@@ -308,8 +308,9 @@ private:
     void calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, InterferInfo &info, int &doaFlg);
     // 多帧数据平滑(排除异常值后取均值)
     void getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
-    // 对单颗卫星多帧相位差进行平滑
-    void calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA);
+    // 对单颗卫星多帧相位差进行稳定性过滤 + 跳半周处理 + 圆形均值
+    // requireFromStart=true 时额外要求该卫星从起始帧就存在（校正用）
+    void calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA, bool requireFromStart = false);
     // 取最后一帧数据(不进行平滑时使用)
     void getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     // 组装最终输出的SpoofingResult
@@ -458,6 +459,8 @@ private:
     static const double CNR_MIN_DB;
     // 稳定性阈值(度)：相位差最小覆盖弧 < 该值判为稳定（对应 STABILITY_RANGE_DEG）
     static const double STABILITY_RANGE_DEG;
+    // 每刀至少需要的有效采样帧数才判为稳定（对应 MIN_STABLE_SAMPLES，帧不足时按实际帧数）
+    static const int MIN_STABLE_SAMPLES;
 
     // 连续报警计数：typeInt -> 连续被判为欺骗的刀数；跨刀连续出现 p 次才确认（对应 consecutive）
     std::map<int, int> m_ConsecutiveAlarm;

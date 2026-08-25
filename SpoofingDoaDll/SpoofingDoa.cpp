@@ -410,12 +410,17 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
         for (auto &tp : m_Tracking)
         {
             int typeInt = tp.first;
-            if (m_AngleResultData.find(typeInt) != m_AngleResultData.end())
+            TrackingInfo &t = tp.second;
+
+            if (m_AngleResultData.find(typeInt) != m_AngleResultData.end() && !m_AngleResultData[typeInt].empty())
             {
+                // 本轮仍报警：更新最近一次 DOA（取各星 DOA 圆形均值）
                 vector<double> doas;
+                double sumQ = 0.0;
                 for (auto &ad : m_AngleResultData[typeInt])
                 {
                     doas.push_back((double)ad.i_Angle);
+                    sumQ += ad.i_Quality;
                 }
                 if (!doas.empty())
                 {
@@ -424,8 +429,28 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
                     {
                         mean += 360.0;  // 归一化到 [0°,360°)
                     }
-                    tp.second.doa_deg = mean;
+                    t.doa_deg = mean;
+                    t.quality = sumQ / doas.size();
                 }
+            }
+            else if (m_ConsecutiveAlarm[typeInt] == 0 && t.doa_deg >= 0.0)
+            {
+                // 本轮已消失：把最近一次 DOA 作为该频点的报警结果保留在 m_AngleResultData
+                vector<AlarmData> kept;
+                for (int sid : t.cluster_sats)
+                {
+                    AlarmData ad;
+                    ad.i_Prn = sid;
+                    ad.i_Angle = Round360((int)t.doa_deg);
+                    ad.i_Quality = t.quality;
+                    ad.i_Snr = 0.0f;
+                    if (m_Max_Snr.find(typeInt) != m_Max_Snr.end() && m_Max_Snr[typeInt].find(sid) != m_Max_Snr[typeInt].end())
+                    {
+                        ad.i_Snr = (float)m_Max_Snr[typeInt][sid];
+                    }
+                    kept.emplace_back(ad);
+                }
+                m_AngleResultData[typeInt] = kept;
             }
         }
     }
@@ -914,9 +939,11 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
             oneCutData[k] = dataA[index];
         }
         getSatelliteDataPhaseDiffB(oneCutData, dataB);  // 按卫星汇总
+        // 同天线自校准刀(校正用)额外要求卫星从起始帧就存在
+        bool requireFromStart = (m_cutSequence[j][0] == m_cutSequence[j][1]);
         for (unsigned int i = 0; i < dataB.size(); i++)
         {
-            calSmoothData(dataB[i], tpA);  // 对每颗卫星进行多帧平滑
+            calSmoothData(dataB[i], tpA, requireFromStart);  // 对每颗卫星进行多帧平滑
             tpA2.emplace_back(tpA);
         }
         resultData.emplace_back(tpA2);
@@ -930,14 +957,16 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 // 对单颗卫星多帧相位差做稳定性过滤 + 跳半周处理 + 圆形均值
 // 对应 Python cyclic_phase_detection.py 的 check_stability / circular_mean：
 //   1. 收集载噪比有效(两端口 > 1e-3)的相位差样本（单位: 周 -> 度）；
-//   2. 360° 圆上最小覆盖弧 < STABILITY_RANGE_DEG(5°) -> 稳定，取圆形均值；
-//   3. 否则折叠到 [0,180) 后跨度 < 5° -> 检测到跳半周（HALF_CYCLE_CORRECT=false
+//   2. requireFromStart=true 时要求该卫星从起始帧就存在（校正专用）；
+//   3. 均匀分布：有效采样数 >= min(总帧数, MIN_STABLE_SAMPLES)；
+//   4. 360° 圆上最小覆盖弧 < STABILITY_RANGE_DEG(5°) -> 稳定，取圆形均值；
+//   5. 否则折叠到 [0,180) 后跨度 < 5° -> 检测到跳半周（HALF_CYCLE_CORRECT=false
 //      时按波动大处理，不使用，载噪比置 0 表示无效）；
-//   4. 其余不稳定样本丢弃（载噪比置 0 表示无效）。
+//   6. 其余不稳定样本丢弃（载噪比置 0 表示无效）。
 // 载噪比置 0 后，下游(校正 calCorrecteData / 检测 calAlarmByPhaseDiff / 测向
 // calAngleUseAntenna)都会跳过该卫星。
 // =========================================================================
-void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA)
+void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA, bool requireFromStart)
 {
     vector<double> samples;  // 相位差样本(度)
     double sumSnr1 = 0.0;
@@ -961,6 +990,25 @@ void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhas
 
     int n = (int)samples.size();
     if (n <= 0)
+    {
+        dataA.i_phase_diff = 0.0;
+        dataA.i_Snr1 = 0.0;
+        dataA.i_Snr2 = 0.0;
+        return;
+    }
+
+    // 从起始帧存在（校正专用）：第一帧必须有有效观测
+    if (requireFromStart && (dataB.i_Snr1[0] < 1e-3 || dataB.i_Snr2[0] < 1e-3))
+    {
+        dataA.i_phase_diff = 0.0;
+        dataA.i_Snr1 = 0.0;
+        dataA.i_Snr2 = 0.0;
+        return;
+    }
+
+    // 均匀分布：至少覆盖 min(总帧数, MIN_STABLE_SAMPLES) 个有效采样
+    int required = (length < MIN_STABLE_SAMPLES) ? length : MIN_STABLE_SAMPLES;
+    if (n < required)
     {
         dataA.i_phase_diff = 0.0;
         dataA.i_Snr1 = 0.0;

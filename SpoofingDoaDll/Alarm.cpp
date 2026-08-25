@@ -19,6 +19,7 @@
 // =========================================================================
 const double SpoofingDoa::CNR_MIN_DB = 35.0;           // 载噪比质量门限：两端口都需 ≥35dB
 const double SpoofingDoa::STABILITY_RANGE_DEG = 5.0;   // 稳定性阈值：最小覆盖弧 < 5° 判为稳定
+const int SpoofingDoa::MIN_STABLE_SAMPLES = 5;         // 每刀至少需要的有效采样帧数
 
 // =========================================================================
 // 归一化角度到 [-180°, 180°)，对应 Python simplified_detection.normalize_angle_180
