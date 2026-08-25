@@ -29,7 +29,7 @@ cutFrams=1
 smoothFlg=0
 
 # 用于测向的刀数
-doaCutNum=7
+doaCutNum=6
 
 # 欺骗检测的卫星颗数默认阈值
 detectionNum=4
@@ -48,7 +48,7 @@ cyclicDetectionFlag=0
 qulityThreshold=0.0
 
 # 载噪比门限(dB-Hz): 低于此值的卫星数据不参与处理
-snrThreshold=30.0
+snrThreshold=35.0
 
 # 虚拟孔径标签: 0=不使用 1=使用虚拟阵列扩展
 virtualFlag=0
@@ -88,13 +88,13 @@ simulateFile=/simulateData/
 
 # 连续多少刀检测为欺骗才最终判定(跨刀连续确认的 p)
 # 循环切刀检测对应 Python ALARM_CONSECUTIVE_P，建议 2
-detectionRecoddsNum=1
+detectionRecoddsNum=2
 
 # 数据保存标签
 saveDataFlg=0
 
 # 切刀顺序(RF 开关切换序列)，格式 {{天线1,天线2},...}；同天线对为自校准刀
-cutThw={{7,7},{1,2},{1,3},{1,4},{1,5},{1,6},{1,7}}
+cutThw={{1,1},{1,2},{1,3},{1,4},{1,5},{1,6},{1,7}}
 
 # 阵列仿真数据包含的频率(Hz)
 SimulateFre={{1176e6,1279e6,1561e6,1602e6}}

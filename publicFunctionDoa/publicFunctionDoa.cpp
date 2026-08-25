@@ -21,12 +21,13 @@ namespace PublicSpace
 {
     // ==================== 命名空间全局变量定义 ====================
 
-    /**
-     * @brief 当前可执行文件所在目录路径，默认为当前目录 "."
-     * @note 程序启动时通过 getCurrentExecutablePath() 获取实际路径并更新
-     */
-    string m_CurrentPath = ".";
-    // extern string m_CurrentPath;
+    // ==================== 以下为当前项目组(Spoofing)与Suppress组均未使用的函数，暂时注释保留 ====================
+    // /**
+    //  * @brief 当前可执行文件所在目录路径，默认为当前目录 "."
+    //  * @note 程序启动时通过 getCurrentExecutablePath() 获取实际路径并更新
+    //  */
+    // string m_CurrentPath = ".";
+    // // extern string m_CurrentPath;
 
     /**
      * @brief 日志文件句柄映射表
@@ -124,36 +125,36 @@ namespace PublicSpace
         }
     }
 
-    /**
-     * @brief 多项式最小二乘拟合
-     *
-     * 算法流程：
-     *   1. 构造 Vandermonde 矩阵 A: A(i,j) = x(i)^j (j从0到n)
-     *   2. 使用 BDCSVD (Bidiagonal Divide and Conquer SVD) 分解求解最小二乘问题 A * coeffs = y
-     *   3. BDCSVD 方法在大规模数据下具有较好的数值稳定性和计算效率
-     *
-     * @param x 自变量数据点(Eigen列向量)
-     * @param y 因变量数据点(Eigen列向量)
-     * @param n 拟合多项式最高次数
-     * @param coeffs 输出参数，多项式系数[常数项, 一次项, ..., n次项]，长度为n+1
-     */
-    void polyfit(const VectorXd &x, const VectorXd &y, const int n, VectorXd &coeffs)
-    {
-        int numData = x.size();
-        MatrixXd A(numData, n + 1);
-
-        // 构造Vandermonde矩阵
-        for (int i = 0; i < numData; ++i)
-        {
-            A(i, 0) = 1;
-            for (int j = 1; j <= n; ++j)
-            {
-                A(i, j) = A(i, j - 1) * x(i);
-            }
-        }
-        // 使用最小二乘法求解
-        coeffs = A.bdcSvd(ComputeThinU | ComputeThinV).solve(y);
-    }
+    // /**
+    //  * @brief 多项式最小二乘拟合
+    //  *
+    //  * 算法流程：
+    //  *   1. 构造 Vandermonde 矩阵 A: A(i,j) = x(i)^j (j从0到n)
+    //  *   2. 使用 BDCSVD (Bidiagonal Divide and Conquer SVD) 分解求解最小二乘问题 A * coeffs = y
+    //  *   3. BDCSVD 方法在大规模数据下具有较好的数值稳定性和计算效率
+    //  *
+    //  * @param x 自变量数据点(Eigen列向量)
+    //  * @param y 因变量数据点(Eigen列向量)
+    //  * @param n 拟合多项式最高次数
+    //  * @param coeffs 输出参数，多项式系数[常数项, 一次项, ..., n次项]，长度为n+1
+    //  */
+    // void polyfit(const VectorXd &x, const VectorXd &y, const int n, VectorXd &coeffs)
+    // {
+    //     int numData = x.size();
+    //     MatrixXd A(numData, n + 1);
+    //
+    //     // 构造Vandermonde矩阵
+    //     for (int i = 0; i < numData; ++i)
+    //     {
+    //         A(i, 0) = 1;
+    //         for (int j = 1; j <= n; ++j)
+    //         {
+    //             A(i, j) = A(i, j - 1) * x(i);
+    //         }
+    //     }
+    //     // 使用最小二乘法求解
+    //     coeffs = A.bdcSvd(ComputeThinU | ComputeThinV).solve(y);
+    // }
 
     /**
      * @brief 计算复数向量的L2范数（欧几里得范数）
@@ -522,52 +523,52 @@ namespace PublicSpace
         //      }
         //  }
     }
-    /**
-     * @brief 将二维复数vector调整为指定维度(cols x rows)，所有元素初始化为 (1.0 + 0.0i)
-     *
-     * @param data 输入/输出参数，要调整的二维复数vector，调用后旧数据被清空
-     * @param cols 目标列数（外层vector的大小）
-     * @param rows 目标行数（内层vector的大小）
-     */
-    void VectorResizeToOne(std::vector<std::vector<std::complex<double>>> &data, int cols, int rows)
-    {
-        // 清空容器
-        data.clear();
-
-        data.resize(cols, std::vector<std::complex<double>>(rows, std::complex<double>(1.0, 0.0)));
-    }
-    /**
-     * @brief 获取当前可执行文件所在的目录路径（跨平台实现）
-     *
-     * Windows: 使用 GetModuleHandle(NULL) + GetModuleFileName + PathRemoveFileSpec
-     *          需要链接 Shlwapi.lib (PathRemoveFileSpec函数)
-     * Linux:   使用 dladdr + dirname 获取动态库加载地址并提取目录路径
-     *
-     * @return 可执行文件所在目录的绝对路径，失败时返回 "."
-     */
-    std::string getCurrentExecutablePath(void)
-    { // 根据不同的操作系统采用不同的方法来获取当前可执行文件的目录路径
-#ifdef _WIN32
-        char path[MAX_PATH];
-        HMODULE hModule = GetModuleHandle(NULL);
-        if (hModule != NULL)
-        {
-            GetModuleFileName(hModule,path, sizeof(path));
-            PathRemoveFileSpec(path); // 移除文件名，只保留目录
-            return path;
-        }
-#else
-        Dl_info dl_info;
-        if (dladdr(reinterpret_cast<void *>(getCurrentExecutablePath), &dl_info))
-        {
-            char *dir_path = strdup(dl_info.dli_fname);
-            std::string directory = dirname(dir_path);
-            free(dir_path); // 释放分配的内存
-            dir_path = NULL;
-            return directory;
-        }
-#endif
-        return ".";
-    }
+    // /**
+    //  * @brief 将二维复数vector调整为指定维度(cols x rows)，所有元素初始化为 (1.0 + 0.0i)
+    //  *
+    //  * @param data 输入/输出参数，要调整的二维复数vector，调用后旧数据被清空
+    //  * @param cols 目标列数（外层vector的大小）
+    //  * @param rows 目标行数（内层vector的大小）
+    //  */
+    // void VectorResizeToOne(std::vector<std::vector<std::complex<double>>> &data, int cols, int rows)
+    // {
+    //     // 清空容器
+    //     data.clear();
+    //
+    //     data.resize(cols, std::vector<std::complex<double>>(rows, std::complex<double>(1.0, 0.0)));
+    // }
+    // /**
+    //  * @brief 获取当前可执行文件所在的目录路径（跨平台实现）
+    //  *
+    //  * Windows: 使用 GetModuleHandle(NULL) + GetModuleFileName + PathRemoveFileSpec
+    //  *          需要链接 Shlwapi.lib (PathRemoveFileSpec函数)
+    //  * Linux:   使用 dladdr + dirname 获取动态库加载地址并提取目录路径
+    //  *
+    //  * @return 可执行文件所在目录的绝对路径，失败时返回 "."
+    //  */
+    // std::string getCurrentExecutablePath(void)
+    // { // 根据不同的操作系统采用不同的方法来获取当前可执行文件的目录路径
+    // #ifdef _WIN32
+    //     char path[MAX_PATH];
+    //     HMODULE hModule = GetModuleHandle(NULL);
+    //     if (hModule != NULL)
+    //     {
+    //         GetModuleFileName(hModule,path, sizeof(path));
+    //         PathRemoveFileSpec(path); // 移除文件名，只保留目录
+    //         return path;
+    //     }
+    // #else
+    //     Dl_info dl_info;
+    //     if (dladdr(reinterpret_cast<void *>(getCurrentExecutablePath), &dl_info))
+    //     {
+    //         char *dir_path = strdup(dl_info.dli_fname);
+    //         std::string directory = dirname(dir_path);
+    //         free(dir_path); // 释放分配的内存
+    //         dir_path = NULL;
+    //         return directory;
+    //     }
+    // #endif
+    //     return ".";
+    // }
    
 }

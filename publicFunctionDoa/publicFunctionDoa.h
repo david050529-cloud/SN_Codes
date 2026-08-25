@@ -53,12 +53,13 @@ using namespace Eigen;
 
 namespace PublicSpace
 {
-    /**
-     * @brief 当前可执行文件所在的目录路径
-     * @note 默认值为 "."，由 getCurrentExecutablePath() 在程序启动时赋值
-     *       用于拼接配置文件、日志文件等相对路径的基准目录
-     */
-    extern string m_CurrentPath;
+    // ==================== 以下为当前项目组(Spoofing)与Suppress组均未使用的函数，暂时注释保留 ====================
+    // /**
+    //  * @brief 当前可执行文件所在的目录路径
+    //  * @note 默认值为 "."，由 getCurrentExecutablePath() 在程序启动时赋值
+    //  *       用于拼接配置文件、日志文件等相对路径的基准目录
+    //  */
+    // extern string m_CurrentPath;
 
     /**
      * @brief 日志记录控制标志
@@ -77,13 +78,13 @@ namespace PublicSpace
      */
     extern int m_save_data_Flg; // 是否保存原始数据,1 保存，其他不保存
 
-    /**
-     * @brief 获取当前可执行文件所在的目录路径（跨平台）
-     * @return 返回可执行文件所在目录的绝对路径字符串，失败时返回 "."
-     * @note Windows下使用GetModuleHandle/GetModuleFileName获取，
-     *       Linux下使用dladdr/dirname获取
-     */
-    std::string getCurrentExecutablePath(void); // 获得当前执行程序的路径
+    // /**
+    //  * @brief 获取当前可执行文件所在的目录路径（跨平台）
+    //  * @return 返回可执行文件所在目录的绝对路径字符串，失败时返回 "."
+    //  * @note Windows下使用GetModuleHandle/GetModuleFileName获取，
+    //  *       Linux下使用dladdr/dirname获取
+    //  */
+    // std::string getCurrentExecutablePath(void); // 获得当前执行程序的路径
 
     // ==================== 数据操作 ====================
 
@@ -121,15 +122,15 @@ namespace PublicSpace
 
     // ==================== 数学工具 ====================
 
-    /**
-     * @brief 多项式最小二乘拟合（BdSVD求解）
-     * @param x 自变量数据点构成的Eigen列向量
-     * @param y 因变量数据点构成的Eigen列向量
-     * @param n 拟合多项式的最高次数
-     * @param coeffs 输出参数，拟合得到的多项式系数（从常数项到n次项），长度为n+1
-     * @note 构造Vandermonde矩阵后使用BDCSVD分解求解，数值稳定性好
-     */
-    void polyfit(const VectorXd &x, const VectorXd &y, const int n, VectorXd &coeffs); // 曲线拟合
+    // /**
+    //  * @brief 多项式最小二乘拟合（BdSVD求解）
+    //  * @param x 自变量数据点构成的Eigen列向量
+    //  * @param y 因变量数据点构成的Eigen列向量
+    //  * @param n 拟合多项式的最高次数
+    //  * @param coeffs 输出参数，拟合得到的多项式系数（从常数项到n次项），长度为n+1
+    //  * @note 构造Vandermonde矩阵后使用BDCSVD分解求解，数值稳定性好
+    //  */
+    // void polyfit(const VectorXd &x, const VectorXd &y, const int n, VectorXd &coeffs); // 曲线拟合
 
     /**
      * @brief 计算复数向量的L2范数（欧几里得范数）
@@ -273,14 +274,14 @@ namespace PublicSpace
         return oss.str();
     }
 
-    /**
-     * @brief 将二维复数vector调整为指定维度，并将所有元素初始化为 (1.0 + 0.0i)
-     * @param data 输入/输出参数，要调整大小的二维复数vector
-     * @param cols 目标列数（第一维大小）
-     * @param rows 目标行数（第二维大小）
-     * @note 先清空原数据，再resize并填充默认值(1.0, 0.0)
-     */
-    void VectorResizeToOne(std::vector<std::vector<std::complex<double>>> &data, int cols, int rows); // 复数vector初始化
+    // /**
+    //  * @brief 将二维复数vector调整为指定维度，并将所有元素初始化为 (1.0 + 0.0i)
+    //  * @param data 输入/输出参数，要调整大小的二维复数vector
+    //  * @param cols 目标列数（第一维大小）
+    //  * @param rows 目标行数（第二维大小）
+    //  * @note 先清空原数据，再resize并填充默认值(1.0, 0.0)
+    //  */
+    // void VectorResizeToOne(std::vector<std::vector<std::complex<double>>> &data, int cols, int rows); // 复数vector初始化
 
     /**
      * @brief 将数组数据以二进制格式追加写入文件

@@ -381,52 +381,53 @@ void ArithmeticDoa::getUseAntennaByADirect(const vector<double> A, const int use
     Log("  startAngle=%d,endAngle=%d\n", startAngle, endAngle);
 }
 
-/**
- * @brief 从相位差数据还原各天线的绝对相位（按天线对顺序推导版本）
- *
- * 注意：假设天线对按顺序排列（如 [1,2], [2,3], [3,4], ...），便于顺序推导。
- * 假设第一个天线对中的第一个天线的相位为 0（参考天线），然后按顺序推导其他天线的相位。
- *
- * 推导规则：
- *   若 ant2 不是参考天线（first_antenna），则：
- *     phase[ant2] = phase[ant1] - diff(ant1, ant2)
- *   因为 diff(ant1, ant2) = phase(ant1) - phase(ant2)，所以 phase(ant2) = phase(ant1) - diff
- *
- * 潜在问题：
- *   - 未处理切刀顺序最大序号大于天线个数的异常
- *   - 未处理切刀顺序不是按天线序号连续的情况（如 [1 2], [3 4] 跳过了天线 2->3 的关系）
- *
- * @param cutSequence 天线对序列
- * @param phaseDiff 相位差数组 [输入] 天线对间差值 / [输出] 各天线的绝对相位（弧度）
- * @param antennNUm 天线总数
- */
-void ArithmeticDoa::getAntennaPhase(vector<vector<int>> &cutSequence, vector<double> &phaseDiff, int antennNUm)
-{ // 注意：异常未处理：切刀顺序最大序号大于天线个数；切刀顺序不是按天线序号的顺序来，例如【1 2】【3 4】
-    vector<double> tp_phs;
-    tp_phs.clear();
-    tp_phs.resize(antennNUm);
-    // 选取第一个天线对中的第一个天线作为参考天线，设其相位为 0
-    int first_antenna = cutSequence[0][0] - 1;
-    tp_phs[first_antenna] = 0.0;
-    int ant1 = 0;
-    int ant2 = 0;
-    for (int i = 0; i < (int)phaseDiff.size(); i++)
-    {
-        ant1 = cutSequence[i][0] - 1; // 天线对的第一个天线（0-based）
-        ant2 = cutSequence[i][1] - 1; // 天线对的第二个天线（0-based）
-        if (ant2 != first_antenna) // 参考天线本身不需要重新计算
-        {
-            // 从已知的 ant1 相位推导 ant2 的相位
-            // diff = phase(ant1) - phase(ant2)  =>  phase(ant2) = phase(ant1) - diff
-            tp_phs[ant2] = tp_phs[ant1] - phaseDiff[i];
-        }
-
-        Log("ant1=%d,ant2=%d,phs=%.2f\n", ant1 + 1, ant2 + 1, tp_phs[ant2] * 180 / m_PI);
-    }
-    phaseDiff.clear();
-    phaseDiff = tp_phs;
-    Log("get all per antenna phase sucess...\n");
-}
+// ==================== 以下为当前项目组(Spoofing)与Suppress组均未使用的函数，暂时注释保留 ====================
+// /**
+//  * @brief 从相位差数据还原各天线的绝对相位（按天线对顺序推导版本）
+//  *
+//  * 注意：假设天线对按顺序排列（如 [1,2], [2,3], [3,4], ...），便于顺序推导。
+//  * 假设第一个天线对中的第一个天线的相位为 0（参考天线），然后按顺序推导其他天线的相位。
+//  *
+//  * 推导规则：
+//  *   若 ant2 不是参考天线（first_antenna），则：
+//  *     phase[ant2] = phase[ant1] - diff(ant1, ant2)
+//  *   因为 diff(ant1, ant2) = phase(ant1) - phase(ant2)，所以 phase(ant2) = phase(ant1) - diff
+//  *
+//  * 潜在问题：
+//  *   - 未处理切刀顺序最大序号大于天线个数的异常
+//  *   - 未处理切刀顺序不是按天线序号连续的情况（如 [1 2], [3 4] 跳过了天线 2->3 的关系）
+//  *
+//  * @param cutSequence 天线对序列
+//  * @param phaseDiff 相位差数组 [输入] 天线对间差值 / [输出] 各天线的绝对相位（弧度）
+//  * @param antennNUm 天线总数
+//  */
+// void ArithmeticDoa::getAntennaPhase(vector<vector<int>> &cutSequence, vector<double> &phaseDiff, int antennNUm)
+// { // 注意：异常未处理：切刀顺序最大序号大于天线个数；切刀顺序不是按天线序号的顺序来，例如【1 2】【3 4】
+//     vector<double> tp_phs;
+//     tp_phs.clear();
+//     tp_phs.resize(antennNUm);
+//     // 选取第一个天线对中的第一个天线作为参考天线，设其相位为 0
+//     int first_antenna = cutSequence[0][0] - 1;
+//     tp_phs[first_antenna] = 0.0;
+//     int ant1 = 0;
+//     int ant2 = 0;
+//     for (int i = 0; i < (int)phaseDiff.size(); i++)
+//     {
+//         ant1 = cutSequence[i][0] - 1; // 天线对的第一个天线（0-based）
+//         ant2 = cutSequence[i][1] - 1; // 天线对的第二个天线（0-based）
+//         if (ant2 != first_antenna) // 参考天线本身不需要重新计算
+//         {
+//             // 从已知的 ant1 相位推导 ant2 的相位
+//             // diff = phase(ant1) - phase(ant2)  =>  phase(ant2) = phase(ant1) - diff
+//             tp_phs[ant2] = tp_phs[ant1] - phaseDiff[i];
+//         }
+//
+//         Log("ant1=%d,ant2=%d,phs=%.2f\n", ant1 + 1, ant2 + 1, tp_phs[ant2] * 180 / m_PI);
+//     }
+//     phaseDiff.clear();
+//     phaseDiff = tp_phs;
+//     Log("get all per antenna phase sucess...\n");
+// }
 /**
  * @brief 从相位差数据还原指定天线的绝对相位（图连通性推导版本）
  *
@@ -567,45 +568,45 @@ void ArithmeticDoa::getUsePhaseDiffAll(const vector<int> use_cut, vector<vector<
     }
 }
 
-/**
- * @brief 对所有天线，生成全部两两之间的相位差（全排列版本）
- *
- * 与 getUsePhaseDiffAll 的区别：本函数使用所有天线（默认从 1 到 N），
- * phaseDiff 输入为各天线的绝对相位（按天线编号 1..N 排列），
- * 输出为全部 C(N,2) 对天线之间的相位差。
- *
- * @param cutSequence 输出的天线对序列（全部 C(N,2) 组合）
- * @param phaseDiff [输入] 所有天线的绝对相位 / [输出] 全部天线对间的相位差
- */
-void ArithmeticDoa::getPhaseDiffAll(vector<vector<int>> &cutSequence, vector<double> &phaseDiff)
-{
-    vector<double> result_phs;
-    result_phs.clear();
-
-    int size = (int)phaseDiff.size(); // 天线总数
-    int num = size * (size - 1) / 2;  // 全部组合数 C(N,2)
-    vectorResize(cutSequence, num, 2);
-    result_phs.resize(num);
-    int num1 = 0;
-    int num2 = 0;
-    num = 0;
-    for (int i = 0; i < size - 1; i++)
-    {
-        num1 = i + 1; // 天线 i+1 的编号
-        for (int j = i + 1; j < size; j++)
-        {
-
-            num2 = j + 1; // 天线 j+1 的编号
-            cutSequence[num][0] = num1;
-            cutSequence[num][1] = num2;
-            result_phs[num] = phaseDiff[i] - phaseDiff[j]; // diff = phase(i) - phase(j)
-            num++;
-        }
-    }
-    phaseDiff.clear();
-    phaseDiff = result_phs;
-    Log("get all phase diff...\n ");
-}
+// /**
+//  * @brief 对所有天线，生成全部两两之间的相位差（全排列版本）
+//  *
+//  * 与 getUsePhaseDiffAll 的区别：本函数使用所有天线（默认从 1 到 N），
+//  * phaseDiff 输入为各天线的绝对相位（按天线编号 1..N 排列），
+//  * 输出为全部 C(N,2) 对天线之间的相位差。
+//  *
+//  * @param cutSequence 输出的天线对序列（全部 C(N,2) 组合）
+//  * @param phaseDiff [输入] 所有天线的绝对相位 / [输出] 全部天线对间的相位差
+//  */
+// void ArithmeticDoa::getPhaseDiffAll(vector<vector<int>> &cutSequence, vector<double> &phaseDiff)
+// {
+//     vector<double> result_phs;
+//     result_phs.clear();
+//
+//     int size = (int)phaseDiff.size(); // 天线总数
+//     int num = size * (size - 1) / 2;  // 全部组合数 C(N,2)
+//     vectorResize(cutSequence, num, 2);
+//     result_phs.resize(num);
+//     int num1 = 0;
+//     int num2 = 0;
+//     num = 0;
+//     for (int i = 0; i < size - 1; i++)
+//     {
+//         num1 = i + 1; // 天线 i+1 的编号
+//         for (int j = i + 1; j < size; j++)
+//         {
+//
+//             num2 = j + 1; // 天线 j+1 的编号
+//             cutSequence[num][0] = num1;
+//             cutSequence[num][1] = num2;
+//             result_phs[num] = phaseDiff[i] - phaseDiff[j]; // diff = phase(i) - phase(j)
+//             num++;
+//         }
+//     }
+//     phaseDiff.clear();
+//     phaseDiff = result_phs;
+//     Log("get all phase diff...\n ");
+// }
 
 // void ArithmeticDoa::getUsePhaseDiffAll(const vector<int> use_cut, vector<vector<int>> &cutSequence, vector<double> &phaseDiff)
 // {

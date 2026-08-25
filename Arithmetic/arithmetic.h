@@ -360,16 +360,17 @@ protected:
      */
     void setUseAntennaAndPhaseAll(vector<vector<int>> &cutSequence, vector<double> &phaseDiff);
 
-    /**
-     * @brief 从相位差数据还原各天线的绝对相位（假设第一个天线的相位为 0）
-     *
-     * 适用于天线对按顺序排列（相邻天线对）的场景。
-     *
-     * @param cutSequence 天线对序列
-     * @param phaseDiff 相位差数组（输入为天线对间差值，输出为各天线绝对相位）
-     * @param antennNUm 天线总数
-     */
-    void getAntennaPhase(vector<vector<int>> &cutSequence, vector<double> &phaseDiff, int antennNUm);
+    // ==================== 以下为当前项目组(Spoofing)与Suppress组均未使用的函数，暂时注释保留 ====================
+    // /**
+    //  * @brief 从相位差数据还原各天线的绝对相位（假设第一个天线的相位为 0）
+    //  *
+    //  * 适用于天线对按顺序排列（相邻天线对）的场景。
+    //  *
+    //  * @param cutSequence 天线对序列
+    //  * @param phaseDiff 相位差数组（输入为天线对间差值，输出为各天线绝对相位）
+    //  * @param antennNUm 天线总数
+    //  */
+    // void getAntennaPhase(vector<vector<int>> &cutSequence, vector<double> &phaseDiff, int antennNUm);
 
     /**
      * @brief 从相位差数据还原各天线的绝对相位（指定天线顺序版本）
@@ -385,16 +386,16 @@ protected:
      */
     int getAntennaPhase(const vector<int> use_ant, const int antennNUm, vector<vector<int>> &cutSequence, vector<double> &phaseDiff);
 
-    /**
-     * @brief 生成所有天线对两两之间的相位差（全排列）
-     *
-     * 从各天线的绝对相位出发，计算所有 C(N,2) 对天线之间的相位差：
-     *   diff[i][j] = phase[i] - phase[j]
-     *
-     * @param cutSequence 输出的天线对序列（全排列，共 N*(N-1)/2 对）
-     * @param phaseDiff 输入的各天线绝对相位，输出为对应的相位差数组
-     */
-    void getPhaseDiffAll(vector<vector<int>> &cutSequence, vector<double> &phaseDiff);
+    // /**
+    //  * @brief 生成所有天线对两两之间的相位差（全排列）
+    //  *
+    //  * 从各天线的绝对相位出发，计算所有 C(N,2) 对天线之间的相位差：
+    //  *   diff[i][j] = phase[i] - phase[j]
+    //  *
+    //  * @param cutSequence 输出的天线对序列（全排列，共 N*(N-1)/2 对）
+    //  * @param phaseDiff 输入的各天线绝对相位，输出为对应的相位差数组
+    //  */
+    // void getPhaseDiffAll(vector<vector<int>> &cutSequence, vector<double> &phaseDiff);
 
     /**
      * @brief 生成指定天线之间所有可能的相位差组合
