@@ -18,6 +18,7 @@
 #include <vector>
 #include <queue>
 #include <map>
+#include <set>
 #include <mutex>
 #include <complex>
 #include <algorithm>
@@ -332,6 +333,18 @@ private:
     // 对所有卫星进行跳半周优化测向
     void getOptimizResultDoa180(vector<SatelliteDataPhaseDiffB> dataB);
 
+    // ---- 角度工具（静态，对应 Python simplified_detection 的角度函数）----
+    static double normalizeAngle180(double deg);                  // 归一化到 [-180°,180°)
+    static double circularMeanDeg(const std::vector<double> &degs); // 圆形均值(度)
+    static double circularSpanDeg(const std::vector<double> &degs); // 最小覆盖弧跨度(度)
+    static double foldHalfCycle(double deg);                       // 折叠到 [0°,180°)
+    static double circularSpan180Deg(const std::vector<double> &degs); // 半周圆上的跨度(度)
+
+    // ---- 循环切刀检测流程（对应 Python cyclic_phase_detection.py 主流程）----
+    void resetCyclicDetection(void);   // 清空连续报警计数与跟踪状态
+    // 每刀相位差聚类检测 + 跨刀连续确认 + 测向持续跟踪（只保留确认欺骗的卫星用于测向）
+    void getCyclicDetectionData(std::vector<std::vector<SatelliteDataPhaseDiffA>> &dataA);
+
     // =========================================================================
     // 日志输出函数(WriteLog.cpp)
     // =========================================================================
@@ -437,6 +450,28 @@ private:
     // 通过比较当前帧与历史帧的相位差余弦值变化判断是否跳半周
     std::map<int, std::map<int, InterferInfo>> m_infoData180;
 
+    // =========================================================================
+    // 循环切刀欺骗检测状态（对应 Python cyclic_phase_detection.py）
+    // =========================================================================
+
+    // 载噪比质量门限(dB)：两端口载噪比都需达标（对应 CNR_MIN_DB）
+    static const double CNR_MIN_DB;
+    // 稳定性阈值(度)：相位差最小覆盖弧 < 该值判为稳定（对应 STABILITY_RANGE_DEG）
+    static const double STABILITY_RANGE_DEG;
+
+    // 连续报警计数：typeInt -> 连续被判为欺骗的刀数；跨刀连续出现 p 次才确认（对应 consecutive）
+    std::map<int, int> m_ConsecutiveAlarm;
+
+    // 测向持续跟踪状态（对应 tracking）：确认欺骗后进入跟踪，每轮测向更新最近一次 DOA，
+    // 直到该 (系统,频点) 不再报警才停止跟踪（最终记录保留最近一次 DOA）。
+    struct TrackingInfo
+    {
+        std::set<int> cluster_sats;   // 可疑卫星号集合
+        double doa_deg = -1.0;        // 最近一次测向角度(-1 表示无)
+        double quality = -1.0;        // 最近一次测向质量
+    };
+    std::map<int, TrackingInfo> m_Tracking;   // typeInt -> 跟踪状态
+
 protected:
     // =========================================================================
     // 配置与控制参数
@@ -488,6 +523,11 @@ protected:
     // 1=对每刀数据独立检测，不合并
     // 2=对每刀数据检测并合并，仅对检测为欺骗的信号进行测向
     int m_Doa_Detection_Flag = 0;
+
+    // m_Cyclic_Detection_Flag: 是否使用循环切刀检测流程（对应 cyclic_phase_detection.py）
+    // 0=使用原有检测流程(m_Doa_Detection_Flag)
+    // 1=使用新流程：每刀聚类 + 跨刀连续确认 + 测向持续跟踪
+    int m_Cyclic_Detection_Flag = 0;
 
     // m_Save_Original_Flg: 是否保存原始GNSS数据
     // 0=不保存, 1=保存到二进制文件

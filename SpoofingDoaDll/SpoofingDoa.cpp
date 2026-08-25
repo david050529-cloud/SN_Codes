@@ -61,6 +61,8 @@ void SpoofingDoa::Init(void){
     initType();
     // 初始化欺骗检测历史记录队列
     initRecords();
+    // 初始化循环切刀检测状态(连续报警计数与跟踪)
+    resetCyclicDetection();
     // 设置各频点的阵列半径(m_R)
     setR(m_Radr);
 
@@ -166,15 +168,13 @@ int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
 // =========================================================================
 // 组装最终输出结果
 // 将m_AngleResultData中每个频点的测向结果汇总为SpoofingResult
-// 测向模式:通过calAlarmByAngle按角度聚类，确定每个频点的到达角
+// 测向模式:直接输出每颗卫星的DOA，频点角度取各星DOA的圆形均值
 // 检测模式:直接输出所有卫星的测向结果(角度可能为-1表示仅检测未测向)
 // =========================================================================
 void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
 {
     int count = 0;
-    vector<int> alarmIndex;
     int typeInt = 0;
-    int alarm = 0;
     double angle = 0.0;
     int prn = 0;
     // 遍历所有频点的测向结果
@@ -188,19 +188,25 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
         angle = -1;
         if (0 == m_Detection_Tag)
         {
-            // 测向模式:按角度聚类，找出最集中的到达角方向
-            calAlarmByAngle(typeInt, tp, alarmIndex, alarm, angle);
-            if (0 == alarm)
+            // 测向模式：直接输出每颗卫星的 DOA；频点角度取各星 DOA 的圆形均值
+            // （原 calAlarmByAngle 角度聚类已按新流程移除，对应 Python circular_mean(doas)）
+            vector<double> doas;
+            doas.reserve(tp.size());
+            for (unsigned int i = 0; i < tp.size(); i++)
             {
-                continue; // 未找到足够的同方向卫星，跳过
+                doas.push_back((double)tp[i].i_Angle);
             }
-
-            result.i_SatelliteAngle[count].i_Angle = angle;
-            result.i_SatelliteAngle[count].i_Count = (int)alarmIndex.size();
-            for (unsigned int i = 0; i < alarmIndex.size(); i++)
+            angle = tp.empty() ? -1.0 : circularMeanDeg(doas);
+            if (angle < 0)
             {
-                prn = tp[alarmIndex[i]].i_Prn;
-                result.i_SatelliteAngle[count].i_AlarmData[i] = tp[alarmIndex[i]];
+                angle += 360.0;  // 归一化到 [0°, 360°)
+            }
+            result.i_SatelliteAngle[count].i_Angle = angle;
+            result.i_SatelliteAngle[count].i_Count = (int)tp.size();
+            for (unsigned int i = 0; i < tp.size(); i++)
+            {
+                prn = tp[i].i_Prn;
+                result.i_SatelliteAngle[count].i_AlarmData[i] = tp[i];
                 result.i_SatelliteAngle[count].i_AlarmData[i].i_Snr = m_Max_Snr[typeInt][prn];
             }
         }
@@ -358,7 +364,13 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
     }
 
     // 步骤5: 欺骗信号检测与筛选(可选)
-    if (m_Doa_Detection_Flag != 0)
+    if (m_Cyclic_Detection_Flag != 0)
+    {
+        nowT = getNowTime();
+        PublicSpace::Log("get Cyclic Detection Data:  %s \n", nowT.c_str());
+        getCyclicDetectionData(dataA); // 循环切刀检测：每刀聚类 + 跨刀连续确认 + 跟踪
+    }
+    else if (m_Doa_Detection_Flag != 0)
     {
         nowT = getNowTime();
         PublicSpace::Log("get Spoofing Detection Data:  %s \n", nowT.c_str());
@@ -390,6 +402,32 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
         }
 
         getResultAmpPhaseDoa(dataB);  // 幅相法测向
+    }
+
+    // 步骤8: 更新循环切刀跟踪状态中的最近一次 DOA（对应 Python tracking 的 last_doa）
+    if (m_Cyclic_Detection_Flag != 0)
+    {
+        for (auto &tp : m_Tracking)
+        {
+            int typeInt = tp.first;
+            if (m_AngleResultData.find(typeInt) != m_AngleResultData.end())
+            {
+                vector<double> doas;
+                for (auto &ad : m_AngleResultData[typeInt])
+                {
+                    doas.push_back((double)ad.i_Angle);
+                }
+                if (!doas.empty())
+                {
+                    double mean = circularMeanDeg(doas);
+                    if (mean < 0)
+                    {
+                        mean += 360.0;  // 归一化到 [0°,360°)
+                    }
+                    tp.second.doa_deg = mean;
+                }
+            }
+        }
     }
 }
 
@@ -777,10 +815,10 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
 // =========================================================================
 // 根据map保存的数据,计算告警值
 // 对每个频点依次进行:
-// 1. 相位差法检测(calAlarmByPhaseDiff)
-// 2. 载噪比法检测(calAlarmBySnr) - 如果相位差法未检测到且该频点启用了载噪比检测
-// 3. 滑动窗口确认(setDetectionRecords)
-// 4. 将检测结果合并到m_AngleResultData
+// 1. 相位差法检测(calAlarmByPhaseDiff，载噪比≥35dB 作为数据质量门限)
+// 2. 滑动窗口确认(setDetectionRecords)
+// 3. 将检测结果合并到m_AngleResultData
+// 注: 载噪比聚类(calAlarmBySnr)与角度聚类(calAlarmByAngle)已按新流程移除
 // =========================================================================
 void SpoofingDoa::getAlarm(const std::map<int, std::vector<SatelliteDataPhaseDiffA>> &dataT)
 {
@@ -796,17 +834,11 @@ void SpoofingDoa::getAlarm(const std::map<int, std::vector<SatelliteDataPhaseDif
         tpA2.clear();
         tpA2 = it->second;
 
-        // 欺骗检查 - 方法1: 相位差法
+        // 欺骗检查 - 相位差法
         calAlarmByPhaseDiff(typeInt, tpA2, tpA, alarm);
 
-        // 如果相位差法未检测到欺骗，且该频点启用了载噪比检测，则使用载噪比法
-        if (0 == alarm){
-            if (m_Detection_snrThrehold[typeInt] == 1)
-            {
-                tpA.clear();
-                calAlarmBySnr(typeInt, tpA2, tpA, alarm);  // 方法2: 载噪比法
-            }
-        }
+        // 载噪比聚类检测已按新流程移除（原方法2: calAlarmBySnr），载噪比仅作为
+        // 数据质量门限（≥35dB）在 calAlarmByPhaseDiff 中生效。
 
         // 滑动窗口确认:需要连续多帧均检测为欺骗才最终判定
         setDetectionRecords(typeInt, alarm);
@@ -895,96 +927,76 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 }
 
 // =========================================================================
-// 对单颗卫星多帧相位差进行平滑
-// 方法:
-// 1. 取其中一刀的相位差为参考，统计与其相近(差值<阈值)的其他刀
-// 2. 找到一致性最高的那组(最多相近帧)
-// 3. 将该组相位差转换为复数(单位矢量)后取均值
-// 4. 复数均值的辐角即为平滑后的相位差
-// 这种方法能有效排除个别帧的异常相位差(如周跳)
+// 对单颗卫星多帧相位差做稳定性过滤 + 跳半周处理 + 圆形均值
+// 对应 Python cyclic_phase_detection.py 的 check_stability / circular_mean：
+//   1. 收集载噪比有效(两端口 > 1e-3)的相位差样本（单位: 周 -> 度）；
+//   2. 360° 圆上最小覆盖弧 < STABILITY_RANGE_DEG(5°) -> 稳定，取圆形均值；
+//   3. 否则折叠到 [0,180) 后跨度 < 5° -> 检测到跳半周（HALF_CYCLE_CORRECT=false
+//      时按波动大处理，不使用，载噪比置 0 表示无效）；
+//   4. 其余不稳定样本丢弃（载噪比置 0 表示无效）。
+// 载噪比置 0 后，下游(校正 calCorrecteData / 检测 calAlarmByPhaseDiff / 测向
+// calAngleUseAntenna)都会跳过该卫星。
 // =========================================================================
 void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA)
 {
-    // 多帧平滑，先排除差异较大的相位差，再将剩余的相位差进行平滑
-    // 相位差单位:周
-    double Phasediff_Threshold = m_Phasediff_Threshold / 360;  // 将阈值从度转换为周
-    int maxCount = -99;
-    int count = 0;
-    double tp1, tp2;
-    double diff = 0;
-    vector<double> tp_phase_diff;
-    vector<double> phase_diff;
-    double phs_diff_d = 0.0;
-    complex<double> tp_sumComplex(0.0, 0.0);
-    complex<double> sumComplex(0.0, 0.0);
-    double sumSnr1;
-    double sumSnr2;
-    double tp_sumSnr1 = 0.0;
-    double tp_sumSnr2 = 0.0;
+    vector<double> samples;  // 相位差样本(度)
+    double sumSnr1 = 0.0;
+    double sumSnr2 = 0.0;
     int length = dataB.i_diffLen;
-    sumSnr1 = 0.0;
-    sumSnr2 = 0.0;
     for (int i = 0; i < length; ++i)
     {
-
         if (dataB.i_Snr1[i] < 1e-3 || dataB.i_Snr2[i] < 1e-3)
         {
-            continue;
+            continue;  // 载噪比无效，不使用该样本
         }
-        count = 0;
-        tp_phase_diff.clear();
-        tp1 = dataB.i_phase_diff[i];  // 以第i刀为参考
-        tp_sumComplex.imag(0.0);
-        tp_sumComplex.real(0.0);
-        tp_sumSnr1 = 0.0;
-        tp_sumSnr2 = 0.0;
-        for (int j = 0; j < length; ++j)
-        {
-            if (dataB.i_Snr1[j] < 1e-3 || dataB.i_Snr2[j] < 1e-3)
-            {
-                continue;
-            }
-            tp2 = dataB.i_phase_diff[j];
-            diff = tp1 - tp2;
-            // 相位差相近(差值小于阈值)的刀纳入同一组
-            if (fabs(diff) < Phasediff_Threshold)
-            {
-                tp_sumSnr1 = tp_sumSnr1 + dataB.i_Snr1[j];
-                tp_sumSnr2 = tp_sumSnr2 + dataB.i_Snr2[j];
-                phs_diff_d = tp2 * 2 * PI;  // 转换为弧度
-                complex<double> tp_phs(cos(phs_diff_d), sin(phs_diff_d));  // 转换为单位复数
-                tp_sumComplex = tp_sumComplex + tp_phs;
-                ++count;
-                tp_phase_diff.emplace_back(tp2);
-            }
-        }
-        // 找到一致性最高(最多帧相近)的组
-        if (count > maxCount)
-        {
-            maxCount = count;
-            phase_diff = tp_phase_diff;
-            sumComplex = tp_sumComplex;
-            sumSnr1 = tp_sumSnr1;
-            sumSnr2 = tp_sumSnr2;
-        }
+        samples.emplace_back(dataB.i_phase_diff[i] * 360.0);  // 周 -> 度
+        sumSnr1 += dataB.i_Snr1[i];
+        sumSnr2 += dataB.i_Snr2[i];
     }
-    // 复数均值法:取单位复数的均值，辐角即为平滑后的相位差
-    complex<double> meanComplex(0.0, 0.0);
-    meanComplex.real(sumComplex.real() / maxCount);
-    meanComplex.imag(sumComplex.imag() / maxCount);
-    double smoothDiff = 0.0;
-    smoothDiff = arg(meanComplex) / (2 * PI);  // 从辐角转换回周
-    if (smoothDiff < 0)
-    {
-        smoothDiff = smoothDiff + 1;  // 归一化到[0,1)周
-    }
-    // 组装输出结果
+
+    // 组装输出基本字段
     dataA.i_Sys = dataB.i_Sys;
     dataA.i_Type = dataB.i_Type;
-    dataA.i_phase_diff = smoothDiff;
     dataA.i_Prn = dataB.i_Prn;
-    dataA.i_Snr1 = sumSnr1 / maxCount;  // 平均载噪比
-    dataA.i_Snr2 = sumSnr2 / maxCount;
+
+    int n = (int)samples.size();
+    if (n <= 0)
+    {
+        dataA.i_phase_diff = 0.0;
+        dataA.i_Snr1 = 0.0;
+        dataA.i_Snr2 = 0.0;
+        return;
+    }
+
+    // 稳定判定：360° 圆上最小覆盖弧 < 5°
+    if (circularSpanDeg(samples) < STABILITY_RANGE_DEG)
+    {
+        double smoothDeg = circularMeanDeg(samples);
+        double smoothCycle = smoothDeg / 360.0;
+        if (smoothCycle < 0)
+        {
+            smoothCycle += 1.0;  // 归一化到 [0,1) 周
+        }
+        dataA.i_phase_diff = smoothCycle;
+        dataA.i_Snr1 = sumSnr1 / n;
+        dataA.i_Snr2 = sumSnr2 / n;
+        return;
+    }
+
+    // 跳半周检测：折叠到 [0,180) 后跨度 < 5°。HALF_CYCLE_CORRECT=false 时
+    // 跳半周按相位差波动大处理（不使用），载噪比置 0 表示无效。
+    if (circularSpan180Deg(samples) < STABILITY_RANGE_DEG)
+    {
+        dataA.i_phase_diff = 0.0;
+        dataA.i_Snr1 = 0.0;
+        dataA.i_Snr2 = 0.0;
+        return;
+    }
+
+    // 普通波动大，不使用
+    dataA.i_phase_diff = 0.0;
+    dataA.i_Snr1 = 0.0;
+    dataA.i_Snr2 = 0.0;
 }
 
 // =========================================================================
@@ -1155,6 +1167,10 @@ void SpoofingDoa::setConfigData(const string adr)
     (void)getMapData(configMap, "doaDetectionFlag", m_Doa_Detection_Flag);
     PublicSpace::Log("doaDetectionFlag=%d\n", m_Doa_Detection_Flag);
 
+    // 循环切刀检测标签(是否使用循环切刀检测流程)
+    (void)getMapData(configMap, "cyclicDetectionFlag", m_Cyclic_Detection_Flag);
+    PublicSpace::Log("cyclicDetectionFlag=%d\n", m_Cyclic_Detection_Flag);
+
     // 质量门限(低于此值的结果丢弃)
     (void)getMapData(configMap, "qulityThreshold", m_Qulity_Threshold);
     PublicSpace::Log("qulityThreshold=%.1f\n", m_Qulity_Threshold);
@@ -1254,6 +1270,101 @@ void SpoofingDoa::setConfigData(const string adr)
     else
     {
         getMapData(configMap, "Radr", m_Radr);  // 定向天线:半径配置文件路径
+    }
+}
+
+// =========================================================================
+// 清空循环切刀检测的连续报警计数与跟踪状态（对应 Python consecutive / tracking）
+// =========================================================================
+void SpoofingDoa::resetCyclicDetection(void)
+{
+    m_ConsecutiveAlarm.clear();
+    m_Tracking.clear();
+}
+
+// =========================================================================
+// 循环切刀欺骗检测（对应 Python cyclic_phase_detection.py 主流程）
+// 对每刀做相位差聚类检测，跨刀连续确认(连续 p=m_Detection_Recodds_Num 刀)，确认后进入
+// 测向跟踪；只保留已确认欺骗的 (系统,频点) 卫星用于后续测向。
+// 数据流: dataA 已按刀划分且完成校正，每刀 = 该刀稳定(校正后)相位差的卫星列表。
+// =========================================================================
+void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
+{
+    int cutNum = (int)dataA.size();
+
+    for (int j = 0; j < cutNum; ++j)
+    {
+        // 跳过同天线自校准刀(仅用于校正，不参与检测)
+        if (j < (int)m_cutSequence.size() && m_cutSequence[j][0] == m_cutSequence[j][1])
+        {
+            continue;
+        }
+
+        std::map<int, std::vector<SatelliteDataPhaseDiffA>> dataT;
+        getSatelliteDataByType(dataA[j], dataT);
+
+        // 本刀各频点报警的卫星号集合
+        std::map<int, std::set<int>> cutAlarms;
+        for (auto &kv : dataT)
+        {
+            int typeInt = kv.first;
+            vector<SatelliteDataPhaseDiffA> alarmSats;
+            int alarm = 0;
+            calAlarmByPhaseDiff(typeInt, kv.second, alarmSats, alarm);
+            if (alarm)
+            {
+                std::set<int> sids;
+                for (auto &s : alarmSats)
+                {
+                    sids.insert(s.i_Prn);
+                }
+                cutAlarms[typeInt] = sids;
+            }
+        }
+
+        // 1. 本刀未报警的 (系统,频点) 中断连续
+        for (auto &kv : m_ConsecutiveAlarm)
+        {
+            if (cutAlarms.find(kv.first) == cutAlarms.end())
+            {
+                kv.second = 0;
+            }
+        }
+        // 2. 本刀报警的 (系统,频点) 连续 +1；达到 p 次确认进入跟踪
+        for (auto &kv : cutAlarms)
+        {
+            int typeInt = kv.first;
+            int c = m_ConsecutiveAlarm[typeInt] + 1;
+            m_ConsecutiveAlarm[typeInt] = c;
+            if (c >= m_Detection_Recodds_Num)
+            {
+                TrackingInfo &t = m_Tracking[typeInt];
+                for (int sid : kv.second)
+                {
+                    t.cluster_sats.insert(sid);
+                }
+            }
+        }
+    }
+
+    // 3. 只保留已确认(跟踪中)频点的卫星数据，供后续相关干涉仪测向
+    std::set<int> confirmedTypeInts;
+    for (auto &tp : m_Tracking)
+    {
+        confirmedTypeInts.insert(tp.first);
+    }
+    for (int j = 0; j < cutNum; ++j)
+    {
+        vector<SatelliteDataPhaseDiffA> filtered;
+        for (auto &sat : dataA[j])
+        {
+            int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
+            if (confirmedTypeInts.find(typeInt) != confirmedTypeInts.end())
+            {
+                filtered.emplace_back(sat);
+            }
+        }
+        dataA[j] = filtered;
     }
 }
 

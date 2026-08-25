@@ -14,18 +14,16 @@
 #include "pch.h"
 #include "SpoofingDoa.h"
 
-#include <set>
-
 // =========================================================================
-// 欺骗检测参数（对应 Python cyclic_phase_detection.py 的数据质量门限）
+// 欺骗检测参数（对应 Python cyclic_phase_detection.py）
 // =========================================================================
-static const double CNR_MIN_DB = 35.0;  // 载噪比质量门限：两端口载噪比都需 ≥35dB
+const double SpoofingDoa::CNR_MIN_DB = 35.0;           // 载噪比质量门限：两端口都需 ≥35dB
+const double SpoofingDoa::STABILITY_RANGE_DEG = 5.0;   // 稳定性阈值：最小覆盖弧 < 5° 判为稳定
 
 // =========================================================================
 // 归一化角度到 [-180°, 180°)，对应 Python simplified_detection.normalize_angle_180
-// 把 [0°, 360°) 的相位差折叠到以 0° 为中心的主值区间，消除 0/360 边界歧义
 // =========================================================================
-static double normalizeAngle180(double deg)
+double SpoofingDoa::normalizeAngle180(double deg)
 {
     double r = fmod(deg + 180.0, 360.0);
     if (r < 0)
@@ -33,6 +31,106 @@ static double normalizeAngle180(double deg)
         r += 360.0;
     }
     return r - 180.0;
+}
+
+// =========================================================================
+// 角度圆形均值(度)，对应 Python circular_mean
+// =========================================================================
+double SpoofingDoa::circularMeanDeg(const std::vector<double> &degs)
+{
+    double s = 0.0;
+    double c = 0.0;
+    for (double d : degs)
+    {
+        double rad = d * PI / 180.0;
+        s += sin(rad);
+        c += cos(rad);
+    }
+    return atan2(s, c) * 180.0 / PI;
+}
+
+// =========================================================================
+// 最小覆盖弧跨度(度)，对应 Python circular_span
+// =========================================================================
+double SpoofingDoa::circularSpanDeg(const std::vector<double> &degs)
+{
+    int n = (int)degs.size();
+    if (n <= 1)
+    {
+        return 0.0;
+    }
+    vector<double> a;
+    a.reserve(n);
+    for (double d : degs)
+    {
+        a.push_back(normalizeAngle180(d));
+    }
+    sort(a.begin(), a.end());
+    double maxGap = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        double gap = fmod(a[(i + 1) % n] - a[i], 360.0);
+        if (gap < 0)
+        {
+            gap += 360.0;
+        }
+        if (gap > maxGap)
+        {
+            maxGap = gap;
+        }
+    }
+    return 360.0 - maxGap;
+}
+
+// =========================================================================
+// 折叠到 [0°, 180°)，消除跳半周(±180°)歧义，对应 Python fold_half_cycle
+// =========================================================================
+double SpoofingDoa::foldHalfCycle(double deg)
+{
+    double r = fmod(normalizeAngle180(deg), 180.0);
+    if (r < 0)
+    {
+        r += 180.0;
+    }
+    return r;
+}
+
+// =========================================================================
+// 180° 半周圆上的最小覆盖弧跨度(度)，对应 Python circular_span_180
+// =========================================================================
+double SpoofingDoa::circularSpan180Deg(const std::vector<double> &degs)
+{
+    int n = (int)degs.size();
+    if (n <= 1)
+    {
+        return 0.0;
+    }
+    vector<double> a;
+    a.reserve(n);
+    for (double d : degs)
+    {
+        double r = fmod(d, 180.0);
+        if (r < 0)
+        {
+            r += 180.0;
+        }
+        a.push_back(r);
+    }
+    sort(a.begin(), a.end());
+    double maxGap = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        double gap = fmod(a[(i + 1) % n] - a[i], 180.0);
+        if (gap < 0)
+        {
+            gap += 180.0;
+        }
+        if (gap > maxGap)
+        {
+            maxGap = gap;
+        }
+    }
+    return 180.0 - maxGap;
 }
 
 // =========================================================================
