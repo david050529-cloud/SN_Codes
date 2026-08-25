@@ -14,15 +14,37 @@
 #include "pch.h"
 #include "SpoofingDoa.h"
 
+#include <set>
+
+// =========================================================================
+// 欺骗检测参数（对应 Python cyclic_phase_detection.py 的数据质量门限）
+// =========================================================================
+static const double CNR_MIN_DB = 35.0;  // 载噪比质量门限：两端口载噪比都需 ≥35dB
+
+// =========================================================================
+// 归一化角度到 [-180°, 180°)，对应 Python simplified_detection.normalize_angle_180
+// 把 [0°, 360°) 的相位差折叠到以 0° 为中心的主值区间，消除 0/360 边界歧义
+// =========================================================================
+static double normalizeAngle180(double deg)
+{
+    double r = fmod(deg + 180.0, 360.0);
+    if (r < 0)
+    {
+        r += 360.0;
+    }
+    return r - 180.0;
+}
+
 // =========================================================================
 // 利用相位差计算是否告警(相位差法欺骗检测)
 // 核心思想: 真实卫星来自不同方向，相位差各不相同；
 //           欺骗信号来自同一干扰源，相位差应当相近(差异在阈值内)
-// 算法流程:
-//   1. 遍历每颗卫星，以该星为参考统计相位差相近的卫星数量
-//   2. 找到最大聚类的卫星组(相位差相近卫星数最多的组)
-//   3. 如果最大聚类卫星数达到检测阈值，且有第二组同样达到阈值且载噪比相近，
-//      则判定为欺骗(双重确认机制)
+// 检测方法对应 Python cyclic_phase_detection.py 的 cluster_satellites：
+//   1. 数据筛选：两端口载噪比均 ≥ 35dB 的观测才参与检测（载噪比质量门限）；
+//   2. 相位差由「周」转「度」并归一化到 [-180°, 180°)，消除 0/360 边界歧义；
+//   3. 按相位差排序后，用滑动窗口找「跨度 < 相位差阈值」的最大卫星集合
+//      （比原「以某星为参考数邻近星」更准确：聚类跨度直接受阈值约束）；
+//   4. 最大聚类卫星数达到检测阈值则判为欺骗。
 // 输出:
 //   alarmSatelliteData: 判定为欺骗的卫星相位差数据列表
 //   alarm: 1=检测到欺骗, 0=未检测到
@@ -30,100 +52,76 @@
 void SpoofingDoa::calAlarmByPhaseDiff(int typeInt, const std::vector<SatelliteDataPhaseDiffA> &dataA, std::vector<SatelliteDataPhaseDiffA> &alarmSatelliteData, int &alarm) // 利用相位差计算是否告警
 {
     alarmSatelliteData.clear();
-    int maxCount = -1;
-    int count = 0;
-    double tp1, tp2;
-    double diff = 0;
-    vector<SatelliteDataPhaseDiffA> localMaxSatelliteData;
-    vector<vector<SatelliteDataPhaseDiffA>> alarmSatelliteData2;
+    alarm = 0;
+
+    double phsThresholdDeg = m_Detection_PhsThreshold[typeInt] * 360.0;  // 相位差阈值：周 -> 度
+
+    // 1. 数据筛选 + 相位差归一化：valid 存 (校正相位差[度], dataA 索引)
+    vector<pair<double, int>> valid;
     for (unsigned int i = 0; i < dataA.size(); ++i)
     {
-        count = 0;
-        localMaxSatelliteData.clear();
-
-        tp1 = dataA[i].i_phase_diff;  // 以第i颗卫星为参考
-        for (unsigned int j = 0; j < dataA.size(); ++j)
+        if (dataA[i].i_Snr1 < CNR_MIN_DB || dataA[i].i_Snr2 < CNR_MIN_DB)
         {
-            // 跳过载噪比无效的卫星(载噪比接近0表示未收到该卫星信号)
-            if (dataA[j].i_Snr1 < 1e-3 || dataA[j].i_Snr2 < 1e-3)
-            {
-
-                continue;
-            }
-            tp2 = dataA[j].i_phase_diff;
-            diff = tp1 - tp2;
-            if (diff < 0)
-            {
-                diff = -diff;  // 计算相位差之差的绝对值
-            }
-
-            // 相位差相近(差值小于检测阈值)
-            if (diff < m_Detection_PhsThreshold[typeInt])
-            {
-                ++count;
-                localMaxSatelliteData.emplace_back(dataA[j]);
-            }
+            continue;  // 载噪比不达标，不使用该观测
         }
-        // 更新最大聚类
-        if (count > maxCount)
-        {
-
-            maxCount = count;
-            alarmSatelliteData = localMaxSatelliteData;
-            alarmSatelliteData2.clear();
-        }
-        // 记录刚好达到阈值-1的组(用于后续双重确认)
-        if (count == (m_Detection_Threshold[typeInt] - 1))
-        {
-            alarmSatelliteData2.emplace_back(localMaxSatelliteData);
-        }
-    }
-    // 双重确认: 如果有多组刚好达到阈值-1的聚类，且其中存在载噪比相近的组
-    if (maxCount == (m_Detection_Threshold[typeInt] - 1))
-    {
-        double tp_snr1 = 0.0;
-        double tp_snr2 = 0.0;
-        int count2 = 0;
-        alarm = 0;
-        vector<SatelliteDataPhaseDiffA> tp_alarmData;
-        for (int k = 1; k < (int)alarmSatelliteData2.size(); k++)
-        {
-            tp_alarmData = alarmSatelliteData2[k];
-            for (int i = 0; i < maxCount; i++)
-            {
-                count2 = 0;
-                tp_snr1 = tp_alarmData[i].i_Snr1;
-                for (int j = 0; j < maxCount; j++)
-                {
-                    tp_snr2 = tp_alarmData[j].i_Snr1;
-                    // 载噪比差值<=1dB(验证相位差聚类中的卫星载噪比也相近)
-                    if (abs(tp_snr1 - tp_snr2) <= 1)
-                    {
-                        ++count2;
-                    }
-                }
-                if (count2 == maxCount)  // 组内所有卫星载噪比都相近
-                {
-                    alarm = 1;
-                    alarmSatelliteData = tp_alarmData;
-                    break;
-                }
-            }
-            if (1 == alarm)
-            {
-                break;
-            }
-        }
-    }
-    else
-    {
-        // 最大聚类卫星数达到或超过阈值
-        alarm = (maxCount >= (m_Detection_Threshold[typeInt]) ? 1 : 0);
+        double ph = normalizeAngle180(dataA[i].i_phase_diff * 360.0);  // [0,360) -> [-180,180)
+        valid.emplace_back(ph, (int)i);
     }
 
-    if (0 == alarm)
+    int n = (int)valid.size();
+    if (n < 2)
     {
-        alarmSatelliteData.clear();
+        return;  // 少于 2 颗有效卫星，无法形成聚集
+    }
+
+    // 2. 排序 + 复制一份(整体 +360°) 解决簇跨越 0/360 边界的问题
+    sort(valid.begin(), valid.end());
+    vector<pair<double, int>> ext;
+    ext.reserve(2 * n);
+    for (const auto &p : valid)
+    {
+        ext.emplace_back(p.first, p.second);
+    }
+    for (const auto &p : valid)
+    {
+        ext.emplace_back(p.first + 360.0, p.second);
+    }
+
+    // 3. 滑动窗口：窗口内相位差跨度 < 阈值，找最大聚类
+    int bestCount = 0;
+    vector<int> bestIds;
+    int left = 0;
+    for (int right = 0; right < (int)ext.size(); ++right)
+    {
+        while (ext[right].first - ext[left].first >= phsThresholdDeg)
+        {
+            ++left;
+        }
+        // 窗口最多包含 n 颗星，防止同一颗星(复制份)被重复计数
+        while (right - left + 1 > n)
+        {
+            ++left;
+        }
+        set<int> ids;
+        for (int k = left; k <= right; ++k)
+        {
+            ids.insert(ext[k].second);
+        }
+        if ((int)ids.size() > bestCount)
+        {
+            bestCount = (int)ids.size();
+            bestIds.assign(ids.begin(), ids.end());
+        }
+    }
+
+    // 4. 判定：最大聚类卫星数达到阈值
+    if (bestCount >= m_Detection_Threshold[typeInt])
+    {
+        alarm = 1;
+        for (int idx : bestIds)
+        {
+            alarmSatelliteData.emplace_back(dataA[idx]);
+        }
     }
 }
 
