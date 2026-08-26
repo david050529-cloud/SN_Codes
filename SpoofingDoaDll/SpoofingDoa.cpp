@@ -456,7 +456,7 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
 
 // =========================================================================
 // 设置告警数据 - 欺骗检测模式(无校正)
-// 流程: GNSSData -> 相位差计算 -> 按频点分类 -> 三种方法检测(getAlarm)
+// 流程: GNSSData -> 相位差计算 -> 按频点分类 -> 相位差法检测(getAlarm)
 // 结果存储在 m_AngleResultData 中
 // =========================================================================
 void SpoofingDoa::setDataAlarm(const GNSSData data)
