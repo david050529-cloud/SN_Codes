@@ -49,7 +49,9 @@ void SpoofingDoa::setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>
 // 由同天线校正刀数据计算校正偏移 —— 对应 Python compute_calibration
 // 流程:
 //   1. 数据筛选(对应 Python cyclic_phase_detection.py compute_calibration):
-//      - 从起始帧存在: 卫星必须出现在第一个同天线刀(校正刀)中;
+//      - 从起始帧存在: 每次切刀持续 8s(8帧)，卫星须从该刀第一帧(第一秒)就存在。
+//        该过滤已由上游 getSmoothData/calSmoothData 的 requireFromStart 完成
+//        (不满足的卫星载噪比已置 0，此处按 <1e-3 跳过)，不再按「第一个校正刀」过滤;
 //      - 相位差稳定:   最小覆盖弧 < STABILITY_RANGE_DEG(5°);
 //      - 均匀分布:     有效采样数 >= min(校正刀数, MIN_STABLE_SAMPLES);
 //   2. 偏移组合:
@@ -62,7 +64,6 @@ void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiff
     // samples: typeInt -> prn -> [相位差(度), ...]
     map<int, map<int, vector<double>>> samples;  // 相位差样本(度)
     map<int, map<int, double>> sumSnr;           // 载噪比累加(仅用于日志)
-    set<pair<int, int>> firstCutKeys;            // 从起始帧存在
     int nCalCuts = 0;
 
     for (unsigned int c = 0; c < calCuts.size(); ++c)
@@ -71,16 +72,13 @@ void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiff
         for (const auto &sat : calCuts[c])
         {
             // 载噪比有效性检查(数据完整性判断，非质量门限)
+            // 不满足「从该刀第一帧就存在」的卫星已在上游被置 0，此处自动跳过
             if (sat.i_Snr1 < 1e-3 || sat.i_Snr2 < 1e-3)
             {
                 continue;
             }
             int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
             int prn = sat.i_Prn;
-            if (c == 0)
-            {
-                firstCutKeys.insert(make_pair(typeInt, prn));
-            }
             samples[typeInt][prn].emplace_back(sat.i_phase_diff * 360.0);  // 周->度
             sumSnr[typeInt][prn] += (sat.i_Snr1 + sat.i_Snr2) / 2.0;
         }
@@ -105,17 +103,12 @@ void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiff
             int prn = skv.first;
             const vector<double> &samp = skv.second;
 
-            // 1. 从起始帧存在
-            if (firstCutKeys.find(make_pair(typeInt, prn)) == firstCutKeys.end())
-            {
-                continue;
-            }
-            // 2. 相位差稳定(< 5°)
+            // 1. 相位差稳定(< 5°)
             if (circularSpanDeg(samp) >= STABILITY_RANGE_DEG)
             {
                 continue;
             }
-            // 3. 均匀分布(有效采样覆盖足够帧数)
+            // 2. 均匀分布(有效采样覆盖足够帧数)
             if ((int)samp.size() < required)
             {
                 continue;

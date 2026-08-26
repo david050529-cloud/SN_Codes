@@ -886,7 +886,7 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
             oneCutData[k] = dataA[index];
         }
         getSatelliteDataPhaseDiffB(oneCutData, dataB);  // 按卫星汇总
-        // 同天线自校准刀(校正用)额外要求卫星从起始帧就存在
+        // 同天线自校准刀(校正用)额外要求卫星从该刀第一帧(第一秒)就存在（每次切刀持续8s=8帧）
         bool requireFromStart = (m_cutSequence[j][0] == m_cutSequence[j][1]);
         for (unsigned int i = 0; i < dataB.size(); i++)
         {
@@ -904,7 +904,7 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 // 对单颗卫星多帧相位差做稳定性过滤 + 跳半周处理 + 圆形均值
 // 对应 Python cyclic_phase_detection.py 的 check_stability / circular_mean：
 //   1. 收集载噪比有效(两端口 > 1e-3)的相位差样本（单位: 周 -> 度）；
-//   2. requireFromStart=true 时要求该卫星从起始帧就存在（校正专用）；
+//   2. requireFromStart=true 时要求该卫星从该刀第一帧(第一秒)就存在（校正专用）；
 //   3. 均匀分布：有效采样数 >= min(总帧数, MIN_STABLE_SAMPLES)；
 //   4. 360° 圆上最小覆盖弧 < STABILITY_RANGE_DEG(5°) -> 稳定，取圆形均值；
 //   5. 否则折叠到 [0,180) 后跨度 < 5° -> 检测到跳半周（HALF_CYCLE_CORRECT=false
@@ -944,7 +944,7 @@ void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhas
         return;
     }
 
-    // 从起始帧存在（校正专用）：第一帧必须有有效观测
+    // 从起始帧存在（校正专用）：每次切刀持续 8s(8帧)，第一帧(第一秒)必须有有效观测
     if (requireFromStart && (dataB.i_Snr1[0] < 1e-3 || dataB.i_Snr2[0] < 1e-3))
     {
         dataA.i_phase_diff = 0.0;

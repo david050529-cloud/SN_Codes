@@ -98,7 +98,9 @@ const int SpoofingDoa::MIN_STABLE_SAMPLES = 5;         // 每刀至少需要的�
 
 筛选规则：
 1. 载噪比有效性检查（`<1e-3` 跳过，数据完整性判断，非质量门限）
-2. **从起始帧存在**：卫星必须出现在第一个校正刀中
+2. **从起始帧存在**：每次切刀持续 8s(=8 帧)，卫星须从该刀**第一帧（第一秒）**就存在 ——
+   该过滤由上游 `getSmoothData/calSmoothData` 的 `requireFromStart` 完成
+   （不满足的卫星载噪比已置 0，此处按 `<1e-3` 跳过），本函数**不再按「第一个校正刀」过滤**
 3. **相位差稳定**：`circularSpanDeg < STABILITY_RANGE_DEG(5°)`
 4. **均匀分布**：有效采样数 ≥ `min(校正刀数, MIN_STABLE_SAMPLES)`
 
@@ -148,7 +150,8 @@ else if (m_Doa_Detection_Flag != 0)     // 原有：旧检测流程
 - **旧**：以参考刀数邻近帧（差<阈值），一致性最高组转复数取均值
 - **新**（Python `check_stability` / `fold_half_cycle`）：
   1. 收集载噪比有效样本（周→度）
-  2. `requireFromStart=true`（校正刀）要求从起始帧存在
+  2. `requireFromStart=true`（校正刀）要求卫星从该刀第一帧（第一秒）就存在
+     （每次切刀持续 8s=8 帧；并非「出现在第一个校正刀」）
   3. 均匀分布：有效采样数 ≥ min(总帧数, MIN_STABLE_SAMPLES)
   4. 360° 覆盖弧 < 5° → 稳定，取圆形均值
   5. 折叠 180° 后跨度 < 5° → 跳半周，按波动大处理（载噪比置 0）

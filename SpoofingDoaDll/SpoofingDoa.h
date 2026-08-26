@@ -301,7 +301,7 @@ private:
     // 多帧数据平滑(排除异常值后取均值)
     void getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     // 对单颗卫星多帧相位差进行稳定性过滤 + 跳半周处理 + 圆形均值
-    // requireFromStart=true 时额外要求该卫星从起始帧就存在（校正用）
+    // requireFromStart=true 时额外要求该卫星从该刀第一帧(第一秒)就存在（校正用，一刀=8s=8帧）
     void calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA, bool requireFromStart = false);
     // 取最后一帧数据(不进行平滑时使用)
     void getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
