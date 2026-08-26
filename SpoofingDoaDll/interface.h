@@ -11,7 +11,7 @@
 //   setSpoofingDoa         - 输入GNSS观测数据
 //   getAngleSpoofingDoa    - 获取测向结果
 //   setCompassDoa          - 设置罗盘数据(预留)
-//   setDetectionRecordNum  - 设置连续检测记录数
+//   setDetectionRecordNum  - 设置跨刀连续确认刀数(循环切刀检测)
 //   releaseSpoofingDoa     - 释放测向对象资源
 // =============================================================================
 #pragma once

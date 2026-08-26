@@ -23,10 +23,10 @@ phaseDiffThreshold=5.0
 antennaType=0
 
 # 一刀帧数(每个切刀位置采集的帧数); 循环切刀检测建议 8(每刀 8 秒 8 帧)
-cutFrams=1
+cutFrams=8
 
 # 平滑标签: 0=不平滑(取最后一帧) 1=平滑(稳定性过滤+圆形均值)
-smoothFlg=0
+smoothFlg=1
 
 # 用于测向的刀数
 doaCutNum=6
@@ -42,7 +42,7 @@ doaDetectionFlag=0
 
 # 循环切刀检测流程开关: 0=关闭(用 doaDetectionFlag) 1=开启(每刀聚类+跨刀连续确认+测向跟踪)
 # 开启时对应 Python cyclic_phase_detection.py 流程
-cyclicDetectionFlag=0
+cyclicDetectionFlag=1
 
 # 测向质量门限(低于此值丢弃)
 qulityThreshold=0.0

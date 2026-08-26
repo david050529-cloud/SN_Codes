@@ -231,19 +231,17 @@ private:
     void initType(void);
     // 初始化所有频点的欺骗检测阈值(卫星颗数和相位差阈值)
     void initDetectionThreshold(int threshold, double phsThreshold);
-    // 初始化欺骗检测历史记录(滑动窗口队列)
-    void initRecords(void);
     void paraProjectGN902();
     void paraProjectGN930();
 
     // ---- Corrected.cpp: 校正数据处理 ----
-    // 设置校正数据:从同天线功分的通道数据计算相位校正值
+    // 设置校正数据:从同天线自校准刀({1,1}=code=0)提取校正信息并计算偏移
     void setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>> dataA);
-    // 逐卫星更新校正数据(选择载噪比较高的数据保存)
-    void calCorrectionData(const SatelliteDataPhaseDiffA dataA);
+    // 计算校正偏移(对应 Python compute_calibration: 非 GLONASS 按频点圆形均值, GLONASS 逐卫星)
+    void calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiffA>> &calCuts);
     // 对所有输入数据进行相位校正(减去校正值消除通道误差)
     void getCorrectedGnssData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
-    // 对单个卫星数据进行相位差校正
+    // 对单个卫星数据进行相位差校正(对应 Python offset_fn)
     void calCorrecteData(SatelliteDataPhaseDiffA &dataA);
 
     // ---- Directed.cpp: 定向天线测向 ----
@@ -273,12 +271,6 @@ private:
     // ---- Alarm.cpp: 欺骗检测与告警 ----
     // 利用相位差检测欺骗信号:统计相位差相近的卫星数量，超过阈值则告警
     void calAlarmByPhaseDiff(int typeInt, const std::vector<SatelliteDataPhaseDiffA> &dataA, std::vector<SatelliteDataPhaseDiffA> &alarmSatelliteData, int &alarm);
-    // 利用示向度(到达角)判断是否为欺骗:统计角度相近的测向结果数量
-    void calAlarmByAngle(int typeInt, const std::vector<AlarmData> &data, std::vector<int> &alarmIndex, int &alarm, double &angle);
-    // 利用载噪比检测欺骗信号:欺骗信号通常具有相同或相近的载噪比
-    void calAlarmBySnr(int typeInt, const std::vector<SatelliteDataPhaseDiffA> &dataA, std::vector<SatelliteDataPhaseDiffA> &alarmSatelliteData, int &alarm);
-    // 设置欺骗检测记录(滑动窗口)，需连续多帧检测为欺骗才最终判定
-    void setDetectionRecords(int typeInt, int &alarm);
     // 带校正数据的欺骗检测(先校正再检测)
     void setCorrectDetectionDataAlarm(const GNSSData *data, int dataLen);
 
@@ -400,11 +392,6 @@ private:
 
     // ---- 检测记录与模板数据 ----
 
-    // m_Detection_Records: 欺骗检测历史记录(滑动窗口队列)
-    // key=频点编码, value=最近N帧的检测结果(1=欺骗,0=正常)
-    // 需要连续N帧全部检测为欺骗才最终判定，避免虚警
-    std::map<int, std::deque<int>> m_Detection_Records;
-
     // m_Theory: 保存各个频点的理论相位差模板
     // key=频点编码, value=360个角度(0-359度)的理论相位差向量
     // 每个角度对应一组天线对的相位差期望值，用于相关干涉仪匹配
@@ -480,8 +467,9 @@ protected:
     // 配置与控制参数
     // =========================================================================
 
-    // m_Detection_Recodds_Num: 欺骗检测记录个数
-    // 连续多少帧检测为欺骗信号才最终判定，默认为1(每帧独立判定)
+    // m_Detection_Recodds_Num: 跨刀连续确认刀数
+    // 循环切刀检测中连续多少刀检测为欺骗信号才最终判定
+    // (getCyclicDetectionData 中 m_ConsecutiveAlarm 累计阈值)，默认为1(每刀独立判定)
     int m_Detection_Recodds_Num = 1;
 
     // m_Project_flg: 项目号，决定硬件平台和天线配置

@@ -242,9 +242,11 @@ void SpoofingDoa::initDetectionThreshold(int threshold, double phsThreshold){
 }
 
 // =========================================================================
-// 设置连续欺骗检测记录数(滑动窗口长度)
+// 设置连续欺骗检测记录数(跨刀连续确认刀数)
 // 取值范围: 1-10, 超出范围默认设为1
-// 作用: 修改后需要重新初始化记录队列
+// 作用: 对应循环切刀检测中跨刀连续确认所需的连续刀数
+//       (getCyclicDetectionData 中 m_ConsecutiveAlarm 累计阈值，
+//        对应 Python cyclic_phase_detection 的连续确认 CONFIRM)
 // =========================================================================
 void SpoofingDoa::setDetectionRecordNum(int num)
 {
@@ -255,32 +257,5 @@ void SpoofingDoa::setDetectionRecordNum(int num)
     else
     {
         m_Detection_Recodds_Num = num;
-    }
-
-    initRecords();  // 重新初始化历史记录队列
-}
-
-
-// =========================================================================
-// 初始化历史记录(为每个频点创建固定长度的滑动窗口队列)
-// 队列初始值全部为0(表示无欺骗)，长度为m_Detection_Recodds_Num
-// 作用: 每次有新检测结果时，push_back新值,pop_front旧值
-//       当队列中所有值都为1时才最终判定为欺骗
-// =========================================================================
-void SpoofingDoa::initRecords(void)
-{
-    m_Detection_Records.clear();
-    deque<int> qu;
-
-    // 创建初始全0队列
-    for (int i = 0; i < m_Detection_Recodds_Num; ++i)
-    {
-        qu.push_back(0);
-    }
-
-    // 为每个频点分配独立的队列
-    for (auto it = m_F.begin(); it != m_F.end(); ++it)
-    {
-        m_Detection_Records[it->first] = qu;
     }
 }

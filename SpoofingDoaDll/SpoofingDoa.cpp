@@ -36,10 +36,9 @@ SpoofingDoa::SpoofingDoa(void){
 // 1. 清空累积数据(伪谱积分、校正数据、历史记录)
 // 2. 读取配置文件设置所有运行参数(setConfigData)
 // 3. 初始化GNSS频点频率映射表(initType)
-// 4. 初始化检测历史记录队列(initRecords)
-// 5. 设置各频点阵列半径(setR)
-// 6. 初始化检测阈值(initDetectionThreshold)
-// 7. 根据算法类型初始化理论模板(理论相位差/仿真阵列流型)
+// 4. 设置各频点阵列半径(setR)
+// 5. 初始化检测阈值(initDetectionThreshold)
+// 6. 根据算法类型初始化理论模板(理论相位差/仿真阵列流型)
 void SpoofingDoa::Init(void){
 
     // 重置伪谱积分累积器(360个角度bin清零)
@@ -59,8 +58,6 @@ void SpoofingDoa::Init(void){
     setConfigData(tp_config_adr);
     // 初始化GNSS频点频率映射表(m_F)
     initType();
-    // 初始化欺骗检测历史记录队列
-    initRecords();
     // 初始化循环切刀检测状态(连续报警计数与跟踪)
     resetCyclicDetection();
     // 设置各频点的阵列半径(m_R)
@@ -503,61 +500,12 @@ void SpoofingDoa::setCorrectDetectionDataAlarm(const GNSSData *data, int dataLen
         dataA[i] = tp;
         LogGNSSData(data[i], i + 1);
     }
-    // 处理校正数据(切刀中天线对相同的刀 = 同天线功分信号)
-    SatelliteDataPhaseDiffA tp_dataA;
-    for (unsigned int j = 0; j < dataA[0].size(); j++)
-    {
-        tp_dataA = dataA[0][j];
-        if (tp_dataA.i_Snr1 < 1e-6 || tp_dataA.i_Snr2 < 1e-6 || fabs(tp_dataA.i_Snr1 - tp_dataA.i_Snr2) > 10)
-        { // 一般情况下校正数据为同一天线功分得到的，则校正数据的载噪比应该相差不大，若校正数据的载噪比相差大于10dB,则该校正数据不可用
-            continue;
-        }
-        calCorrectionData(tp_dataA);
-    }
-    map<int, SatelliteDataPhaseDiffA> tp_prnData;
-
-    int typeInt = 0;
-
-    // 对所有频点的校正数据进行多星平滑，得到综合校正值
-    for (auto it = m_CorrectionData.begin(); it != m_CorrectionData.end(); ++it)
-    {
-        tp_prnData.clear();
-        typeInt = it->first;
-        tp_prnData = it->second;
-        int count = 0;
-        SatelliteDataPhaseDiffB tpB;
-        SatelliteDataPhaseDiffA tp;
-        tpB.i_Sys = typeInt / 100;
-        tpB.i_Type = typeInt % 100;
-        tpB.i_Prn = -1;
-        for (auto it2 = tp_prnData.begin(); it2 != tp_prnData.end(); ++it2)
-        {
-            if (it2->first == -1)
-            {
-                continue;
-            }
-            tpB.i_phase_diff[count] = it2->second.i_phase_diff;
-            tpB.i_Snr1[count] = it2->second.i_Snr1;
-            tpB.i_Snr2[count] = it2->second.i_Snr2;
-            ++count;
-        }
-        tpB.i_diffLen = count;
-        calSmoothData(tpB, tp);  // 多星平滑得到综合校正值
-
-        m_CorrectionData[typeInt][-1] = tp;  // prn=-1保存综合校正值
-    }
+    // 处理校正数据(GNSSData[0] = 同天线自校准刀 = Python code=0)
+    vector<vector<SatelliteDataPhaseDiffA>> calCuts;
+    calCuts.emplace_back(dataA[0]);
+    calCorrectionOffset(calCuts);  // 计算校正偏移(对应 Python compute_calibration)
 
     PublicSpace::Log("correction data:  %s \n", nowT.c_str());
-    for (auto it = m_CorrectionData.begin(); it != m_CorrectionData.end(); ++it)
-    {
-        map<int, SatelliteDataPhaseDiffA> tpA;
-        tpA = it->second;
-        for (auto itt = tpA.begin(); itt != tpA.end(); ++itt)
-        {
-            SatelliteDataPhaseDiffA tp = itt->second;
-            LogSatelliteDataPhaseDiffA(tp);
-        }
-    }
     // 对第二帧数据(检测用数据)进行校正
     vector<vector<SatelliteDataPhaseDiffA>> dataA2;
     dataA2.resize(1);
@@ -841,9 +789,10 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
 // 根据map保存的数据,计算告警值
 // 对每个频点依次进行:
 // 1. 相位差法检测(calAlarmByPhaseDiff，载噪比≥35dB 作为数据质量门限)
-// 2. 滑动窗口确认(setDetectionRecords)
-// 3. 将检测结果合并到m_AngleResultData
-// 注: 载噪比聚类(calAlarmBySnr)与角度聚类(calAlarmByAngle)已按新流程移除
+// 2. 将检测结果合并到m_AngleResultData
+// 注: 载噪比聚类(calAlarmBySnr)与角度聚类(calAlarmByAngle)已按新流程移除;
+//     本函数为旧(非循环)检测路径，逐帧判定(单帧确认);循环检测路径的跨刀
+//     连续确认由 getCyclicDetectionData 的 m_ConsecutiveAlarm 完成。
 // =========================================================================
 void SpoofingDoa::getAlarm(const std::map<int, std::vector<SatelliteDataPhaseDiffA>> &dataT)
 {
@@ -865,8 +814,6 @@ void SpoofingDoa::getAlarm(const std::map<int, std::vector<SatelliteDataPhaseDif
         // 载噪比聚类检测已按新流程移除（原方法2: calAlarmBySnr），载噪比仅作为
         // 数据质量门限（≥35dB）在 calAlarmByPhaseDiff 中生效。
 
-        // 滑动窗口确认:需要连续多帧均检测为欺骗才最终判定
-        setDetectionRecords(typeInt, alarm);
         if (0 == alarm){
             continue;
         }

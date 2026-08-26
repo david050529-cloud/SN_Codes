@@ -5,89 +5,168 @@
 //           由于两个接收通道(端口0和端口1)的硬件特性不完全一致，会引入
 //           固有的相位偏差(通道间相位误差)，需要通过校正消除。
 //
-// 校正原理: 在切刀顺序中，当天线对的两个天线相同时(如{7,7})，两个通道
+// 校正原理: 在切刀顺序中，当天线对的两个天线相同时(如{1,1})，两个通道
 //           接收的是同一天线的信号(通过功分器分配)，理论上相位差应为0。
 //           实际测得的相位差即为通道间的固有相位误差。
 //           将后续所有相位差测量值减去该校正值，即可消除通道误差。
 //
 // 关键功能:
-//   1. setCorrectionData - 从同天线功分数据计算校正值并做多星平滑
-//   2. calCorrectionData - 逐卫星更新校正数据(选择载噪比高的)
+//   1. setCorrectionData - 从同天线自校准刀({1,1}=code=0)收集校正数据
+//   2. calCorrectionOffset - 计算校正偏移(对应 Python compute_calibration:
+//      非 GLONASS 按频点圆形均值统一偏移, GLONASS 逐卫星偏移)
 //   3. getCorrectedGnssData - 对所有相位差数据应用校正
-//   4. calCorrecteData - 对单个卫星数据减去校正值
+//   4. calCorrecteData - 对单个卫星数据减去校正偏移(对应 Python offset_fn)
 // =============================================================================
 #include "SpoofingDoa.h"
 // 校正数据的相关操作
 
 // =========================================================================
 // 设置校正数据(主入口)
-// 功能: 从切刀中天线对相同的刀(同天线功分信号)提取校正信息
-// 流程:
-//   1. 筛选切刀中天线对相同的刀(如{7,7} -> 天线7与自身，即功分器)
-//   2. 过滤不可用的校正数据(载噪比极低或两通道载噪比差异>10dB)
-//   3. 逐卫星保存校正相位差到m_CorrectionData
-//   4. 对每个频点的所有卫星校正数据进行多星平滑，得到综合校正值(prn=-1)
+// 功能: 从同天线自校准刀({1,1} = Python code=0)提取校正信息，
+//       计算校正偏移后对所有输入数据应用校正。
 // =========================================================================
 void SpoofingDoa::setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>> dataA)
 {
-    int size = (int)dataA.size();
     // 数据长度必须与切刀序列一致
-    if (size != (int)m_cutSequence.size())
+    if (dataA.size() != m_cutSequence.size())
     {
         return;
     }
-    SatelliteDataPhaseDiffA tp_dataA;
-    for (int i = 0; i < size; i++)
+
+    // 收集同天线自校准刀的数据(天线对相同的刀，如 {1,1})
+    vector<vector<SatelliteDataPhaseDiffA>> calCuts;
+    for (unsigned int i = 0; i < dataA.size(); i++)
     {
-        // 筛选天线对相同的刀: 同一天线通过功分器分配到两个通道
         if (m_cutSequence[i][0] == m_cutSequence[i][1])
         {
-            for (unsigned int j = 0; j < dataA[i].size(); j++)
+            calCuts.emplace_back(dataA[i]);
+        }
+    }
+    calCorrectionOffset(calCuts);
+}
+
+// =========================================================================
+// 由同天线校正刀数据计算校正偏移 —— 对应 Python compute_calibration
+// 流程:
+//   1. 数据筛选(对应 Python cyclic_phase_detection.py compute_calibration):
+//      - 从起始帧存在: 卫星必须出现在第一个同天线刀(校正刀)中;
+//      - 相位差稳定:   最小覆盖弧 < STABILITY_RANGE_DEG(5°);
+//      - 均匀分布:     有效采样数 >= min(校正刀数, MIN_STABLE_SAMPLES);
+//   2. 偏移组合:
+//      - 非 GLONASS: 每个(系统,频点)取各稳定卫星偏移的圆形均值, 存入 prn=-1;
+//      - GLONASS(FDMA): 每颗卫星逐星偏移, 存入对应 prn;
+//   3. 每周期重建 m_CorrectionData(与 Python 每周期重算 cal_rx/cal_glo 一致)。
+// =========================================================================
+void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiffA>> &calCuts)
+{
+    // samples: typeInt -> prn -> [相位差(度), ...]
+    map<int, map<int, vector<double>>> samples;  // 相位差样本(度)
+    map<int, map<int, double>> sumSnr;           // 载噪比累加(仅用于日志)
+    set<pair<int, int>> firstCutKeys;            // 从起始帧存在
+    int nCalCuts = 0;
+
+    for (unsigned int c = 0; c < calCuts.size(); ++c)
+    {
+        ++nCalCuts;
+        for (const auto &sat : calCuts[c])
+        {
+            // 载噪比有效性检查(数据完整性判断，非质量门限)
+            if (sat.i_Snr1 < 1e-3 || sat.i_Snr2 < 1e-3)
             {
-                tp_dataA = dataA[i][j];
-                // 过滤条件:
-                //   1. 载噪比极低(未收到信号)
-                //   2. 两通道载噪比差异 > 10dB(功分不均匀或通道异常)
-                if (tp_dataA.i_Snr1 < 1e-6 || tp_dataA.i_Snr2 < 1e-6 || fabs(tp_dataA.i_Snr1 - tp_dataA.i_Snr2) > 10)
-                { // 一般情况下校正数据为同一天线功分得到的，则校正数据的载噪比应该相差不大，若校正数据的载噪比相差大于10dB,则该校正数据不可用
-                    continue;
-                }
-                calCorrectionData(tp_dataA);  // 保存卫星校正数据
+                continue;
+            }
+            int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
+            int prn = sat.i_Prn;
+            if (c == 0)
+            {
+                firstCutKeys.insert(make_pair(typeInt, prn));
+            }
+            samples[typeInt][prn].emplace_back(sat.i_phase_diff * 360.0);  // 周->度
+            sumSnr[typeInt][prn] += (sat.i_Snr1 + sat.i_Snr2) / 2.0;
+        }
+    }
+
+    m_CorrectionData.clear();  // 重建校正数据
+
+    if (nCalCuts <= 0)
+    {
+        return;
+    }
+    int required = (nCalCuts < MIN_STABLE_SAMPLES) ? nCalCuts : MIN_STABLE_SAMPLES;
+
+    map<int, vector<double>> freqVals;  // 非 GLONASS: typeInt -> [稳定卫星偏移(度)...]
+
+    for (auto &tkv : samples)
+    {
+        int typeInt = tkv.first;
+        int sys = typeInt / 100;
+        for (auto &skv : tkv.second)
+        {
+            int prn = skv.first;
+            const vector<double> &samp = skv.second;
+
+            // 1. 从起始帧存在
+            if (firstCutKeys.find(make_pair(typeInt, prn)) == firstCutKeys.end())
+            {
+                continue;
+            }
+            // 2. 相位差稳定(< 5°)
+            if (circularSpanDeg(samp) >= STABILITY_RANGE_DEG)
+            {
+                continue;
+            }
+            // 3. 均匀分布(有效采样覆盖足够帧数)
+            if ((int)samp.size() < required)
+            {
+                continue;
+            }
+
+            double meanDeg = circularMeanDeg(samp);
+            double meanSnr = sumSnr[typeInt][prn] / samp.size();
+
+            SatelliteDataPhaseDiffA tp;
+            tp.i_Sys = sys;
+            tp.i_Type = typeInt % 100;
+            tp.i_Prn = prn;
+            double cyc = fmod(meanDeg / 360.0, 1.0);
+            if (cyc < 0)
+            {
+                cyc += 1.0;  // 归一化到 [0,1) 周
+            }
+            tp.i_phase_diff = cyc;
+            tp.i_Snr1 = meanSnr;
+            tp.i_Snr2 = meanSnr;
+
+            if (sys == 1)
+            {
+                // GLONASS(FDMA): 逐卫星偏移
+                m_CorrectionData[typeInt][prn] = tp;
+            }
+            else
+            {
+                // 非 GLONASS: 收集用于频点级圆形均值
+                freqVals[typeInt].emplace_back(meanDeg);
             }
         }
     }
-    map<int, SatelliteDataPhaseDiffA> tp_prnData;
 
-    int typeInt = 0;
-
-    // 对每个频点进行多星平滑，得到综合校正值
-    for (auto it = m_CorrectionData.begin(); it != m_CorrectionData.end(); ++it)
+    // 非 GLONASS: 每(系统,频点)统一偏移 = 稳定卫星偏移的圆形均值
+    for (auto &fv : freqVals)
     {
-        tp_prnData.clear();
-        typeInt = it->first;
-        tp_prnData = it->second;
-        int count = 0;
-        SatelliteDataPhaseDiffB tpB;
-        SatelliteDataPhaseDiffA tp;
-        tpB.i_Sys = typeInt / 100;
-        tpB.i_Type = typeInt % 100;
-        tpB.i_Prn = -1;
-        // 收集该频点所有卫星的校正数据
-        for (auto it2 = tp_prnData.begin(); it2 != tp_prnData.end(); ++it2)
+        int typeInt = fv.first;
+        double meanDeg = circularMeanDeg(fv.second);
+        double cyc = fmod(meanDeg / 360.0, 1.0);
+        if (cyc < 0)
         {
-            if (it2->first == -1)
-            {
-                continue;  // 跳过已存在的综合校正值
-            }
-            tpB.i_phase_diff[count] = it2->second.i_phase_diff;
-            tpB.i_Snr1[count] = it2->second.i_Snr1;
-            tpB.i_Snr2[count] = it2->second.i_Snr2;
-            ++count;
+            cyc += 1.0;
         }
-        tpB.i_diffLen = count;
-        calSmoothData(tpB, tp);  // 多星平滑(取相位差一致性最高的一组取均值)
-
-        // 综合校正值存入prn=-1位置
+        SatelliteDataPhaseDiffA tp;
+        tp.i_Sys = typeInt / 100;
+        tp.i_Type = typeInt % 100;
+        tp.i_Prn = -1;
+        tp.i_phase_diff = cyc;
+        tp.i_Snr1 = 0;
+        tp.i_Snr2 = 0;
         m_CorrectionData[typeInt][-1] = tp;
     }
 
@@ -100,54 +179,6 @@ void SpoofingDoa::setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>
         {
             SatelliteDataPhaseDiffA tp = itt->second;
             LogSatelliteDataPhaseDiffA(tp);
-        }
-    }
-}
-
-// =========================================================================
-// 逐卫星更新校正数据
-// 功能: 将新的校正数据与已有数据比较，选择载噪比较高的保存
-// 原因: 高载噪比数据具有更低的噪声，校正值更可靠
-// 策略: 如果新数据的载噪比不低于旧数据+10dB，则更新
-//       这里的逻辑考虑了校正数据的跳变现象(载噪比大幅降低时校正数据不可靠)
-// =========================================================================
-void SpoofingDoa::calCorrectionData(const SatelliteDataPhaseDiffA dataA)
-{
-    if (dataA.i_Snr1 < 1e-3 || dataA.i_Snr2 < 1e-3)
-    {
-        return;  // 载噪比无效
-    }
-    int typeInt = TypeInt(dataA.i_Sys, dataA.i_Type);
-    int prn = dataA.i_Prn;
-    map<int, SatelliteDataPhaseDiffA> tp;
-    if (m_CorrectionData.find(typeInt) == m_CorrectionData.end())
-    {
-        // 该频点首次出现，直接存入
-        tp[prn] = dataA;
-        m_CorrectionData[typeInt] = tp;
-    }
-    else
-    {
-
-        tp = m_CorrectionData[typeInt];
-        if (tp.find(prn) == tp.end())
-        {
-            // 该卫星首次出现，直接存入
-            m_CorrectionData[typeInt][prn] = dataA;
-        }
-        else
-        {
-            if (tp[prn].i_Snr1 > (dataA.i_Snr1 + 10) && tp[prn].i_Snr2 > (dataA.i_Snr2 + 10))
-            // 不同帧之间的校正数据不同，校正数据存在跳变现象，载噪比大幅度降低，校正数据跳变
-            // 此时保存旧的(载噪比较高的)校正值
-            {
-                m_CorrectionData[typeInt][prn] = tp[prn];
-            }
-            else
-            {
-                // 更新为新的校正值
-                m_CorrectionData[typeInt][prn] = dataA;
-            }
         }
     }
 }
@@ -169,51 +200,62 @@ void SpoofingDoa::getCorrectedGnssData(vector<vector<SatelliteDataPhaseDiffA>> &
 }
 
 // =========================================================================
-// 对单个卫星数据进行相位差校正
-// 校正策略:
-//   1. 如果有该卫星的校正数据 -> 减去该卫星的校正值(逐星精确校正)
-//   2. 如果无该卫星但有该频点的综合校正值(prn=-1) -> 减去综合校正值
-//   3. 如果两者都没有且当前为检测模式 -> 保持原值
-//   4. 如果两者都没有且当前为测向模式 -> 标记为无效(载噪比置0)
-// 公式: 校正后相位差 = 原始相位差 - 校正相位差
+// 对单个卫星数据进行相位差校正 —— 对应 Python offset_fn
+// 校正策略(与 Python compute_calibration / offset_fn 语义一致):
+//   - GLONASS(FDMA): 逐卫星偏移(该卫星在校正刀有偏移则减之, 否则偏移0不校正);
+//   - 非 GLONASS:    统一频点偏移(prn=-1 综合值, 无则偏移0不校正);
+//   无该频点校正数据时:
+//   - 检测模式 -> 保持原值;
+//   - 测向模式 -> 标记为无效(载噪比置0, 不进入测向)。
+// 公式: 校正后相位差 = 原始相位差 - 校正偏移
 // =========================================================================
 void SpoofingDoa::calCorrecteData(SatelliteDataPhaseDiffA &dataA)
 {
     int typeInt = TypeInt(dataA.i_Sys, dataA.i_Type);
     int prn = dataA.i_Prn;
-    map<int, SatelliteDataPhaseDiffA> tp_prnData;
-    tp_prnData.clear();
-    SatelliteDataPhaseDiffA tp;
 
-    double tp_diff = dataA.i_phase_diff;
     // 载噪比无效
     if (dataA.i_Snr1 < 1e-3 || dataA.i_Snr2 < 1e-3)
     {
         return;
     }
 
-    if (m_CorrectionData.find(typeInt) != m_CorrectionData.end()) // 存在这个频点的校正数据
+    auto it = m_CorrectionData.find(typeInt);
+    if (it == m_CorrectionData.end())
     {
-
-        tp_prnData = m_CorrectionData[typeInt];
-        if (tp_prnData.find(prn) == tp_prnData.end()) // 不存在这个卫星的校正数据
+        // 不存在这个频点的校正数据
+        if (m_Detection_Tag == 1)
         {
-            tp = tp_prnData[-1];  // 使用该频点的综合校正值
-            dataA.i_phase_diff = tp_diff - tp.i_phase_diff;
+            return;  // 检测模式: 保持原值(偏移0)
         }
-        else
-        {
-            dataA.i_phase_diff = tp_diff - tp_prnData[prn].i_phase_diff;  // 使用逐星精确校正值
-        }
-    }
-    else if (m_Detection_Tag == 1)
-    {
-        // 检测模式下，没有校正数据也继续处理
-        return;
-    }
-    else
-    { // 测向模式下如果不存在这个频点的校正数据，则该频点不进入测向
+        // 测向模式: 该频点不进入测向
         dataA.i_Snr1 = 0;
         dataA.i_Snr2 = 0;
+        return;
+    }
+
+    const map<int, SatelliteDataPhaseDiffA> &tp_prnData = it->second;
+    const SatelliteDataPhaseDiffA *off = nullptr;
+    if (dataA.i_Sys == 1)
+    {
+        // GLONASS(FDMA): 逐卫星偏移; 无则该星偏移0不校正(对应 Python offset_fn 返回 0)
+        auto ps = tp_prnData.find(prn);
+        if (ps != tp_prnData.end())
+        {
+            off = &(ps->second);
+        }
+    }
+    else
+    {
+        // 非 GLONASS: 统一频点偏移(prn=-1 综合值)
+        auto pf = tp_prnData.find(-1);
+        if (pf != tp_prnData.end())
+        {
+            off = &(pf->second);
+        }
+    }
+    if (off != nullptr)
+    {
+        dataA.i_phase_diff = dataA.i_phase_diff - off->i_phase_diff;
     }
 }
