@@ -137,7 +137,7 @@ double SpoofingDoa::circularSpan180Deg(const std::vector<double> &degs)
 //   2. 相位差由「周」转「度」并归一化到 [-180°, 180°)，消除 0/360 边界歧义；
 //   3. 按相位差排序后，用滑动窗口找「跨度 < 相位差阈值」的最大卫星集合
 //      （比原「以某星为参考数邻近星」更准确：聚类跨度直接受阈值约束）；
-//   4. 最大聚类卫星数达到检测阈值则判为欺骗。
+//   4. 最大聚类卫星数超过检测阈值(严格大于)则判为欺骗，与 Python 的 cnt > count_thr 一致。
 // 输出:
 //   alarmSatelliteData: 判定为欺骗的卫星相位差数据列表
 //   alarm: 1=检测到欺骗, 0=未检测到
@@ -207,8 +207,8 @@ void SpoofingDoa::calAlarmByPhaseDiff(int typeInt, const std::vector<SatelliteDa
         }
     }
 
-    // 4. 判定：最大聚类卫星数达到阈值
-    if (bestCount >= m_Detection_Threshold[typeInt])
+    // 4. 判定：最大聚类卫星数超过阈值（严格大于，与 Python 的 cnt > count_thr 一致）
+    if (bestCount > m_Detection_Threshold[typeInt])
     {
         alarm = 1;
         for (int idx : bestIds)

@@ -31,8 +31,8 @@ smoothFlg=1
 # 用于测向的刀数
 doaCutNum=6
 
-# 欺骗检测的卫星颗数默认阈值
-detectionNum=4
+# 欺骗检测的卫星颗数默认阈值(严格大于判定，触发≥4；对应 Python 默认 countThreshold=3)
+detectionNum=3
 
 # 伪谱积分标签: 0=不积分 1=积分
 pseudoSpectrumFlag=0

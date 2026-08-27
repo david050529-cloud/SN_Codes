@@ -503,7 +503,8 @@ protected:
     int m_Doa_Cut_Num = 7;
 
     // m_Detection_Threshold_Num: 欺骗检测的卫星颗数默认阈值
-    int m_Detection_Threshold_Num = 4;
+    // 判定为严格大于(bestCount > 阈值，触发≥阈值+1)，对应 Python 默认 countThreshold=3(触发≥4)
+    int m_Detection_Threshold_Num = 3;
 
     // m_PseudoSpectrum_Flag: 是否进行伪谱积分
     // 0=不积分, 1=积分(多帧累积提高测向稳定性)

@@ -21,12 +21,19 @@ SpoofingDoa::SpoofingDoa(void){
     initProject();
     Init();
     // m_Phasediff_Threshold = m_Phasediff_Threshold / 360.0; // 将度转化为周
-    // 部分频点的检测阈值单独设置(针对特定频点的优化配置)
-    setThresholdDetectionDoa(5, -1, 4, 17);  // BDS B2I: 卫星颗数阈值=5
-    setThresholdDetectionDoa(5, -1, 4, 0);   // BDS B1I: 卫星颗数阈值=5
-    setThresholdDetectionDoa(5, -1, 4, 2);   // BDS B3I: 卫星颗数阈值=5
-    setThresholdDetectionDoa(5, -1, 4, 19);  // BDS B2b: 卫星颗数阈值=5
-    setThresholdDetectionDoa(3, 5, 1, 0);    // GLONASS G1: 卫星颗数阈值=3, 相位差阈值=5度
+    // 部分频点的检测阈值单独设置，与 Python simplified_detection.ORIGINAL_CONFIG_TEXT 规则一致
+    // 判定为严格大于（bestCount > m_Detection_Threshold），对应 Python 的 cnt > count_thr
+    setThresholdDetectionDoa(4, -1, 0, 2);    // GPS L5:     Python Sys=0,Type=2  count=4(触发≥5)
+    setThresholdDetectionDoa(3, 5.0, 1, 0);   // GLONASS G1: Python Sys=1,Type=0  count=3(触发≥4) phs=5.0
+    setThresholdDetectionDoa(4, -1, 1, 1);    // GLONASS G2: Python Sys=1,Type=1  count=4(触发≥5)
+    setThresholdDetectionDoa(3, 3.6, 3, 2);   // Galileo E1C: Python Sys=3,Type=2 count=3(触发≥4) phs=3.6
+    setThresholdDetectionDoa(4, 3.6, 3, 12);  // Galileo E5a: Python Sys=3,Type=12 count=4(触发≥5) phs=3.6
+    setThresholdDetectionDoa(4, 3.6, 3, 17);  // Galileo E5b: Python Sys=3,Type=17 count=4(触发≥5) phs=3.6
+    setThresholdDetectionDoa(3, -1, 4, 17);   // BDS B2I:     Python Sys=4,Type=17 count=3(触发≥4)
+    setThresholdDetectionDoa(3, -1, 4, 0);    // BDS B1I:     Python Sys=4,Type=0  count=3(触发≥4)
+    setThresholdDetectionDoa(3, -1, 4, 2);    // BDS B3I:     Python Sys=4,Type=2  count=3(触发≥4)
+    setThresholdDetectionDoa(3, -1, 4, 19);   // BDS B2b:     Python Sys=4,Type=19 count=3(触发≥4)
+    setThresholdDetectionDoa(3, 3.6, 4, 34);  // BDS B1X:     Python Sys=4,Type=34 count=3(触发≥4) phs=3.6
     // setTypeDetectionBySnr(1, 1, 0);
 }
 
