@@ -301,8 +301,9 @@ private:
     // 多帧数据平滑(排除异常值后取均值)
     void getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     // 对单颗卫星多帧相位差进行稳定性过滤 + 跳半周处理 + 圆形均值
-    // requireFromStart=true 时额外要求该卫星从该刀第一帧(第一秒)就存在（校正用，一刀=8s=8帧）
-    void calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA, bool requireFromStart = false);
+    // （对齐 Python check_stability：不要求信号从该刀第一帧就存在，只要求有效采样覆盖
+    //   min(刀内帧数, MIN_STABLE_SAMPLES) 帧，见 detection_lib.compute_calibration/build_vectors_and_detect）
+    void calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA);
     // 取最后一帧数据(不进行平滑时使用)
     void getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     // 组装最终输出的SpoofingResult
@@ -326,14 +327,14 @@ private:
     // 对所有卫星进行跳半周优化测向
     void getOptimizResultDoa180(vector<SatelliteDataPhaseDiffB> dataB);
 
-    // ---- 角度工具（静态，对应 Python simplified_detection 的角度函数）----
+    // ---- 角度工具（静态，对应 Python detection_lib 的角度函数）----
     static double normalizeAngle180(double deg);                  // 归一化到 [-180°,180°)
     static double circularMeanDeg(const std::vector<double> &degs); // 圆形均值(度)
     static double circularSpanDeg(const std::vector<double> &degs); // 最小覆盖弧跨度(度)
     static double foldHalfCycle(double deg);                       // 折叠到 [0°,180°)
     static double circularSpan180Deg(const std::vector<double> &degs); // 半周圆上的跨度(度)
 
-    // ---- 循环切刀检测流程（对应 Python cyclic_phase_detection.py 主流程）----
+    // ---- 循环切刀检测流程（对应 Python detection_main.py / detection_lib.py 循环切刀主流程）----
     void resetCyclicDetection(void);   // 清空连续报警计数与跟踪状态
     // 每刀相位差聚类检测 + 跨刀连续确认 + 测向持续跟踪（只保留确认欺骗的卫星用于测向）
     void getCyclicDetectionData(std::vector<std::vector<SatelliteDataPhaseDiffA>> &dataA);
@@ -439,7 +440,7 @@ private:
     std::map<int, std::map<int, InterferInfo>> m_infoData180;
 
     // =========================================================================
-    // 循环切刀欺骗检测状态（对应 Python cyclic_phase_detection.py）
+    // 循环切刀欺骗检测状态（对应 Python detection_lib.py）
     // =========================================================================
 
     // 载噪比质量门限(dB)：两端口载噪比都需达标（对应 CNR_MIN_DB）
@@ -503,8 +504,8 @@ protected:
     int m_Doa_Cut_Num = 7;
 
     // m_Detection_Threshold_Num: 欺骗检测的卫星颗数默认阈值
-    // 判定为严格大于(bestCount > 阈值，触发≥阈值+1)，对应 Python 默认 countThreshold=3(触发≥4)
-    int m_Detection_Threshold_Num = 3;
+    // 判定为严格大于(bestCount > 阈值，触发≥阈值+1)，对应 Python 默认 countThreshold=2(触发≥3)
+    int m_Detection_Threshold_Num = 2;
 
     // m_PseudoSpectrum_Flag: 是否进行伪谱积分
     // 0=不积分, 1=积分(多帧累积提高测向稳定性)
@@ -516,7 +517,7 @@ protected:
     // 2=对每刀数据检测并合并，仅对检测为欺骗的信号进行测向
     int m_Doa_Detection_Flag = 0;
 
-    // m_Cyclic_Detection_Flag: 是否使用循环切刀检测流程（对应 cyclic_phase_detection.py）
+    // m_Cyclic_Detection_Flag: 是否使用循环切刀检测流程（对应 detection_main.py / detection_lib.py）
     // 0=使用原有检测流程(m_Doa_Detection_Flag)
     // 1=使用新流程：每刀聚类 + 跨刀连续确认 + 测向持续跟踪
     int m_Cyclic_Detection_Flag = 0;

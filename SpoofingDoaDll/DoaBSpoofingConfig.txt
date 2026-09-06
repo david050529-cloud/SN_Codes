@@ -31,8 +31,8 @@ smoothFlg=1
 # 用于测向的刀数
 doaCutNum=6
 
-# 欺骗检测的卫星颗数默认阈值(严格大于判定，触发≥4；对应 Python 默认 countThreshold=3)
-detectionNum=3
+# 欺骗检测的卫星颗数默认阈值(严格大于判定，触发≥3；对应 Python 默认 countThreshold=2)
+detectionNum=2
 
 # 伪谱积分标签: 0=不积分 1=积分
 pseudoSpectrumFlag=0
@@ -41,7 +41,7 @@ pseudoSpectrumFlag=0
 doaDetectionFlag=0
 
 # 循环切刀检测流程开关: 0=关闭(用 doaDetectionFlag) 1=开启(每刀聚类+跨刀连续确认+测向跟踪)
-# 开启时对应 Python cyclic_phase_detection.py 流程
+# 开启时对应 Python detection_main.py / detection_lib.py 循环切刀流程
 cyclicDetectionFlag=1
 
 # 测向质量门限(低于此值丢弃)

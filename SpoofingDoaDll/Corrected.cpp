@@ -46,14 +46,14 @@ void SpoofingDoa::setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>
 }
 
 // =========================================================================
-// 由同天线校正刀数据计算校正偏移 —— 对应 Python compute_calibration
+// 由同天线校正刀数据计算校正偏移 —— 对应 Python detection_lib.py compute_calibration
 // 流程:
-//   1. 数据筛选(对应 Python cyclic_phase_detection.py compute_calibration):
-//      - 从起始帧存在: 每次切刀持续 8s(8帧)，卫星须从该刀第一帧(第一秒)就存在。
-//        该过滤已由上游 getSmoothData/calSmoothData 的 requireFromStart 完成
-//        (不满足的卫星载噪比已置 0，此处按 <1e-3 跳过)，不再按「第一个校正刀」过滤;
-//      - 相位差稳定:   最小覆盖弧 < STABILITY_RANGE_DEG(5°);
-//      - 均匀分布:     有效采样数 >= min(校正刀数, MIN_STABLE_SAMPLES);
+//   1. 数据筛选(对应 Python compute_calibration):
+//      - 均匀分布:     有效采样数 >= min(校正刀内帧数, MIN_STABLE_SAMPLES)
+//        (每刀多帧的稳定性过滤与覆盖判定已由上游 getSmoothData/calSmoothData 完成，
+//         不满足的卫星载噪比已置 0，此处按 <1e-3 跳过；
+//         不再要求信号从该刀第一帧(第一秒)就存在 —— Python 亦不要求);
+//      - 相位差稳定:   最小覆盖弧 < STABILITY_RANGE_DEG(15°);
 //   2. 偏移组合:
 //      - 非 GLONASS: 每个(系统,频点)取各稳定卫星偏移的圆形均值, 存入 prn=-1;
 //      - GLONASS(FDMA): 每颗卫星逐星偏移, 存入对应 prn;
@@ -103,7 +103,7 @@ void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiff
             int prn = skv.first;
             const vector<double> &samp = skv.second;
 
-            // 1. 相位差稳定(< 5°)
+            // 1. 相位差稳定(最小覆盖弧 < STABILITY_RANGE_DEG=15°)
             if (circularSpanDeg(samp) >= STABILITY_RANGE_DEG)
             {
                 continue;
@@ -197,9 +197,9 @@ void SpoofingDoa::getCorrectedGnssData(vector<vector<SatelliteDataPhaseDiffA>> &
 // 校正策略(与 Python compute_calibration / offset_fn 语义一致):
 //   - GLONASS(FDMA): 逐卫星偏移(该卫星在校正刀有偏移则减之, 否则偏移0不校正);
 //   - 非 GLONASS:    统一频点偏移(prn=-1 综合值, 无则偏移0不校正);
-//   无该频点校正数据时:
-//   - 检测模式 -> 保持原值;
-//   - 测向模式 -> 标记为无效(载噪比置0, 不进入测向)。
+//   无该频点校正数据时: 一律偏移 0（保持原值），对应 Python offset_fn 返回 0；
+//   注: 原「测向模式无该频点校正则载噪比置 0 不进入测向」已移除，改为与 Python 一致
+//       (仅当某 (系统,频点) 完全无稳定校正星时才按原相位差继续，Python 同样如此)。
 // 公式: 校正后相位差 = 原始相位差 - 校正偏移
 // =========================================================================
 void SpoofingDoa::calCorrecteData(SatelliteDataPhaseDiffA &dataA)
@@ -216,15 +216,7 @@ void SpoofingDoa::calCorrecteData(SatelliteDataPhaseDiffA &dataA)
     auto it = m_CorrectionData.find(typeInt);
     if (it == m_CorrectionData.end())
     {
-        // 不存在这个频点的校正数据
-        if (m_Detection_Tag == 1)
-        {
-            return;  // 检测模式: 保持原值(偏移0)
-        }
-        // 测向模式: 该频点不进入测向
-        dataA.i_Snr1 = 0;
-        dataA.i_Snr2 = 0;
-        return;
+        return;  // 不存在该频点校正数据：偏移0，保持原值（对齐 Python offset_fn）
     }
 
     const map<int, SatelliteDataPhaseDiffA> &tp_prnData = it->second;

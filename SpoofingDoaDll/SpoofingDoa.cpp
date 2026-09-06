@@ -21,17 +21,19 @@ SpoofingDoa::SpoofingDoa(void){
     initProject();
     Init();
     // m_Phasediff_Threshold = m_Phasediff_Threshold / 360.0; // 将度转化为周
-    // 部分频点的检测阈值单独设置，与 Python simplified_detection.ORIGINAL_CONFIG_TEXT 规则一致
+    // 部分频点的检测阈值单独设置，与 Python detection_lib.ORIGINAL_CONFIG_TEXT 规则一致
+    // （2026-09 对齐：GLONASS G1/G2、BDS B1C 的颗数阈值已按 Python 修正）
     // 判定为严格大于（bestCount > m_Detection_Threshold），对应 Python 的 cnt > count_thr
     setThresholdDetectionDoa(4, -1, 0, 2);    // GPS L5:     Python Sys=0,Type=2  count=4(触发≥5)
-    setThresholdDetectionDoa(3, 5.0, 1, 0);   // GLONASS G1: Python Sys=1,Type=0  count=3(触发≥4) phs=5.0
-    setThresholdDetectionDoa(4, -1, 1, 1);    // GLONASS G2: Python Sys=1,Type=1  count=4(触发≥5)
+    setThresholdDetectionDoa(2, 5.0, 1, 0);   // GLONASS G1: Python Sys=1,Type=0  count=2(触发≥3) phs=5.0
+    setThresholdDetectionDoa(3, 5.0, 1, 1);   // GLONASS G2: Python Sys=1,Type=1  count=3(触发≥4) phs=5.0
     setThresholdDetectionDoa(3, 3.6, 3, 2);   // Galileo E1C: Python Sys=3,Type=2 count=3(触发≥4) phs=3.6
     setThresholdDetectionDoa(4, 3.6, 3, 12);  // Galileo E5a: Python Sys=3,Type=12 count=4(触发≥5) phs=3.6
     setThresholdDetectionDoa(4, 3.6, 3, 17);  // Galileo E5b: Python Sys=3,Type=17 count=4(触发≥5) phs=3.6
     setThresholdDetectionDoa(3, -1, 4, 17);   // BDS B2I:     Python Sys=4,Type=17 count=3(触发≥4)
     setThresholdDetectionDoa(3, -1, 4, 0);    // BDS B1I:     Python Sys=4,Type=0  count=3(触发≥4)
     setThresholdDetectionDoa(3, -1, 4, 2);    // BDS B3I:     Python Sys=4,Type=2  count=3(触发≥4)
+    setThresholdDetectionDoa(2, -1, 4, 8);    // BDS B1C:     Python Sys=4,Type=8  count=2(触发≥3)（新增）
     setThresholdDetectionDoa(3, -1, 4, 19);   // BDS B2b:     Python Sys=4,Type=19 count=3(触发≥4)
     setThresholdDetectionDoa(3, 3.6, 4, 34);  // BDS B1X:     Python Sys=4,Type=34 count=3(触发≥4) phs=3.6
     // setTypeDetectionBySnr(1, 1, 0);
@@ -892,12 +894,20 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
             index = j * m_OneCut_Frams + k;
             oneCutData[k] = dataA[index];
         }
+        // 汇总同一卫星在该刀各帧(秒)的相位差样本。按帧聚合时不套用
+        // m_Delete_Prn_Flag 的「要求全部帧有效」过滤：某几帧缺失的卫星也保留，
+        // 交给 calSmoothData 的覆盖判定 min(刀内帧数, MIN_STABLE_SAMPLES) 决定取舍，
+        // 对应当前 Python build_vectors_and_detect / compute_calibration 的采样覆盖规则。
+        // （原实现此处按 deletePrnFlag=1 会丢弃缺任一帧的卫星，比 Python 严苛太多）
+        int savedDeleteFlag = m_Delete_Prn_Flag;
+        m_Delete_Prn_Flag = 0;
         getSatelliteDataPhaseDiffB(oneCutData, dataB);  // 按卫星汇总
-        // 同天线自校准刀(校正用)额外要求卫星从该刀第一帧(第一秒)就存在（每次切刀持续8s=8帧）
-        bool requireFromStart = (m_cutSequence[j][0] == m_cutSequence[j][1]);
+        m_Delete_Prn_Flag = savedDeleteFlag;
+        // 校正刀与普通刀一样，只要求有效采样覆盖 min(刀内帧数, MIN_STABLE_SAMPLES) 帧，
+        // 不再要求卫星从该刀第一帧(第一秒)就存在（Python compute_calibration 亦不要求）
         for (unsigned int i = 0; i < dataB.size(); i++)
         {
-            calSmoothData(dataB[i], tpA, requireFromStart);  // 对每颗卫星进行多帧平滑
+            calSmoothData(dataB[i], tpA);  // 对每颗卫星进行多帧平滑
             tpA2.emplace_back(tpA);
         }
         resultData.emplace_back(tpA2);
@@ -909,18 +919,18 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 
 // =========================================================================
 // 对单颗卫星多帧相位差做稳定性过滤 + 跳半周处理 + 圆形均值
-// 对应 Python cyclic_phase_detection.py 的 check_stability / circular_mean：
+// 对应 Python detection_lib.py 的 check_stability / circular_mean：
 //   1. 收集载噪比有效(两端口 > 1e-3)的相位差样本（单位: 周 -> 度）；
-//   2. requireFromStart=true 时要求该卫星从该刀第一帧(第一秒)就存在（校正专用）；
-//   3. 均匀分布：有效采样数 >= min(总帧数, MIN_STABLE_SAMPLES)；
-//   4. 360° 圆上最小覆盖弧 < STABILITY_RANGE_DEG(5°) -> 稳定，取圆形均值；
-//   5. 否则折叠到 [0,180) 后跨度 < 5° -> 检测到跳半周（HALF_CYCLE_CORRECT=false
+//   2. 均匀分布：有效采样数 >= min(总帧数, MIN_STABLE_SAMPLES)；
+//   3. 360° 圆上最小覆盖弧 < STABILITY_RANGE_DEG(15°) -> 稳定，取圆形均值；
+//   4. 否则折叠到 [0,180) 后跨度 < 15° -> 检测到跳半周（HALF_CYCLE_CORRECT=false
 //      时按波动大处理，不使用，载噪比置 0 表示无效）；
-//   6. 其余不稳定样本丢弃（载噪比置 0 表示无效）。
+//   5. 其余不稳定样本丢弃（载噪比置 0 表示无效）。
+// 不再要求卫星从该刀第一帧(第一秒)就存在（Python compute_calibration 亦不要求）。
 // 载噪比置 0 后，下游(校正 calCorrecteData / 检测 calAlarmByPhaseDiff / 测向
 // calAngleUseAntenna)都会跳过该卫星。
 // =========================================================================
-void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA, bool requireFromStart)
+void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA)
 {
     vector<double> samples;  // 相位差样本(度)
     double sumSnr1 = 0.0;
@@ -951,15 +961,6 @@ void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhas
         return;
     }
 
-    // 从起始帧存在（校正专用）：每次切刀持续 8s(8帧)，第一帧(第一秒)必须有有效观测
-    if (requireFromStart && (dataB.i_Snr1[0] < 1e-3 || dataB.i_Snr2[0] < 1e-3))
-    {
-        dataA.i_phase_diff = 0.0;
-        dataA.i_Snr1 = 0.0;
-        dataA.i_Snr2 = 0.0;
-        return;
-    }
-
     // 均匀分布：至少覆盖 min(总帧数, MIN_STABLE_SAMPLES) 个有效采样
     int required = (length < MIN_STABLE_SAMPLES) ? length : MIN_STABLE_SAMPLES;
     if (n < required)
@@ -970,7 +971,7 @@ void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhas
         return;
     }
 
-    // 稳定判定：360° 圆上最小覆盖弧 < 5°
+    // 稳定判定：360° 圆上最小覆盖弧 < STABILITY_RANGE_DEG(15°)
     if (circularSpanDeg(samples) < STABILITY_RANGE_DEG)
     {
         double smoothDeg = circularMeanDeg(samples);
@@ -985,7 +986,7 @@ void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhas
         return;
     }
 
-    // 跳半周检测：折叠到 [0,180) 后跨度 < 5°。HALF_CYCLE_CORRECT=false 时
+    // 跳半周检测：折叠到 [0,180) 后跨度 < STABILITY_RANGE_DEG(15°)。HALF_CYCLE_CORRECT=false 时
     // 跳半周按相位差波动大处理（不使用），载噪比置 0 表示无效。
     if (circularSpan180Deg(samples) < STABILITY_RANGE_DEG)
     {
@@ -1285,7 +1286,7 @@ void SpoofingDoa::resetCyclicDetection(void)
 }
 
 // =========================================================================
-// 循环切刀欺骗检测（对应 Python cyclic_phase_detection.py 主流程）
+// 循环切刀欺骗检测（对应 Python detection_main.py / detection_lib.py 循环切刀主流程）
 // 对每刀做相位差聚类检测，跨刀连续确认(连续 p=m_Detection_Recodds_Num 刀)，确认后进入
 // 测向跟踪；只保留已确认欺骗的 (系统,频点) 卫星用于后续测向。
 // 数据流: dataA 已按刀划分且完成校正，每刀 = 该刀稳定(校正后)相位差的卫星列表。
@@ -1349,19 +1350,18 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
         }
     }
 
-    // 3. 只保留已确认(跟踪中)频点的卫星数据，供后续相关干涉仪测向
-    std::set<int> confirmedTypeInts;
-    for (auto &tp : m_Tracking)
-    {
-        confirmedTypeInts.insert(tp.first);
-    }
+    // 3. 只保留已确认(跟踪中)频点的【聚集卫星(cluster_sats)】数据，供后续相关干涉仪测向
+    //    （对齐 Python run_doa_one：只对 tracking.info.cluster_sats 里的卫星做基线测向，
+    //      而不是给该频点的全部卫星测向）
     for (int j = 0; j < cutNum; ++j)
     {
         vector<SatelliteDataPhaseDiffA> filtered;
         for (auto &sat : dataA[j])
         {
             int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
-            if (confirmedTypeInts.find(typeInt) != confirmedTypeInts.end())
+            auto it = m_Tracking.find(typeInt);
+            if (it != m_Tracking.end() &&
+                it->second.cluster_sats.find(sat.i_Prn) != it->second.cluster_sats.end())
             {
                 filtered.emplace_back(sat);
             }

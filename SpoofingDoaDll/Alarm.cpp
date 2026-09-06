@@ -9,14 +9,15 @@
 #include "SpoofingDoa.h"
 
 // =========================================================================
-// 欺骗检测参数（对应 Python cyclic_phase_detection.py）
+// 欺骗检测参数（对应 Python detection_lib.py）
 // =========================================================================
 const double SpoofingDoa::CNR_MIN_DB = 35.0;           // 载噪比质量门限：两端口都需 ≥35dB
-const double SpoofingDoa::STABILITY_RANGE_DEG = 5.0;   // 稳定性阈值：最小覆盖弧 < 5° 判为稳定
-const int SpoofingDoa::MIN_STABLE_SAMPLES = 5;         // 每刀至少需要的有效采样帧数
+const double SpoofingDoa::STABILITY_RANGE_DEG = 15.0;  // 稳定性阈值：最小覆盖弧 < 15° 判为稳定
+                                                       // （对齐 Python detection_lib.STABILITY_RANGE_DEG=15，2026-09 版）
+const int SpoofingDoa::MIN_STABLE_SAMPLES = 3;         // 每刀至少需要的有效采样帧数（对齐 Python MIN_STABLE_SAMPLES=3）
 
 // =========================================================================
-// 归一化角度到 [-180°, 180°)，对应 Python simplified_detection.normalize_angle_180
+// 归一化角度到 [-180°, 180°)，对应 Python detection_lib.normalize_angle_180
 // =========================================================================
 double SpoofingDoa::normalizeAngle180(double deg)
 {
@@ -132,7 +133,7 @@ double SpoofingDoa::circularSpan180Deg(const std::vector<double> &degs)
 // 利用相位差计算是否告警(相位差法欺骗检测)
 // 核心思想: 真实卫星来自不同方向，相位差各不相同；
 //           欺骗信号来自同一干扰源，相位差应当相近(差异在阈值内)
-// 检测方法对应 Python cyclic_phase_detection.py 的 cluster_satellites：
+// 检测方法对应 Python detection_lib.py 的 cluster_satellites：
 //   1. 数据筛选：两端口载噪比均 ≥ 35dB 的观测才参与检测（载噪比质量门限）；
 //   2. 相位差由「周」转「度」并归一化到 [-180°, 180°)，消除 0/360 边界歧义；
 //   3. 按相位差排序后，用滑动窗口找「跨度 < 相位差阈值」的最大卫星集合

@@ -246,7 +246,7 @@ void SpoofingDoa::initDetectionThreshold(int threshold, double phsThreshold){
 // 取值范围: 1-10, 超出范围默认设为1
 // 作用: 对应循环切刀检测中跨刀连续确认所需的连续刀数
 //       (getCyclicDetectionData 中 m_ConsecutiveAlarm 累计阈值，
-//        对应 Python cyclic_phase_detection 的连续确认 CONFIRM)
+//        对应 Python detection_lib.ALARM_CONSECUTIVE_P 连续确认)
 // =========================================================================
 void SpoofingDoa::setDetectionRecordNum(int num)
 {
