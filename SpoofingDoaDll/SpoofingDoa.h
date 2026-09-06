@@ -207,6 +207,14 @@ public:
     // 设置欺骗检测记录数(连续多少帧检测为欺骗才最终判定)
     void setDetectionRecordNum(int num);
 
+    // 设备 wrapper(GN902 等)在 Init 之后覆盖循环切刀运行参数(供外部驱动整轮流式输入)
+    // @param cyclic      是否启用循环切刀检测(对应当前 Python 循环切刀流程)
+    // @param oneCutFrams 每刀帧数; >0 时覆盖 m_OneCut_Frams
+    // @param smooth      是否启用刀内多帧平滑(稳定性过滤 + 圆形均值)
+    // @param omniR       全向阵列半径(m); >0 时按该半径重建 m_R 与测向理论模板
+    //                    (GN902 = 0.1865，与 Python ARRAY_RADIUS 一致; <=0 表示保持当前)
+    void configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR);
+
 private:
     // =========================================================================
     // 各功能模块的私有函数(按源文件分组)

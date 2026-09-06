@@ -15,6 +15,7 @@ add_library(SpoofingDoaDll SHARED
     SpoofingDoa.cpp
     WriteLog.cpp
     interface.cpp
+    interface_GN902.cpp
     dllmain.cpp
     pch.cpp
 )

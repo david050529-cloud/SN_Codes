@@ -1286,6 +1286,36 @@ void SpoofingDoa::resetCyclicDetection(void)
 }
 
 // =========================================================================
+// 设备 wrapper(GN902 等)覆盖循环切刀运行参数
+// 供外部按“整轮(7 刀)流式喂帧”驱动引擎时使用；omniR>0 时按该半径重建
+// m_R 与测向理论模板，确保与 Python ARRAY_RADIUS(=0.1865, GN902)一致。
+// =========================================================================
+void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR)
+{
+    m_Cyclic_Detection_Flag = cyclic ? 1 : 0;
+    m_Doa_Detection_Flag = 0;
+    if (oneCutFrams > 0)
+    {
+        m_OneCut_Frams = oneCutFrams;
+    }
+    m_Smooth_Flag = smooth ? 1 : 0;
+
+    if (omniR > 0 && 0 == m_antnenaType)
+    {
+        m_omni_R = omniR;
+        m_R.clear();
+        setR(m_Radr);           // 全向天线：m_R[typeInt] = m_omni_R
+        m_Theory.clear();
+        if (1 == m_Doa_Arithmetic)
+        {
+            initTheory();       // 按新半径重建 360° 理论相位模板
+        }
+    }
+    PublicSpace::Log("configCyclicRuntime: cyclic=%d oneCutFrams=%d smooth=%d omniR=%.4f\n",
+                     m_Cyclic_Detection_Flag, m_OneCut_Frams, m_Smooth_Flag, m_omni_R);
+}
+
+// =========================================================================
 // 循环切刀欺骗检测（对应 Python detection_main.py / detection_lib.py 循环切刀主流程）
 // 对每刀做相位差聚类检测，跨刀连续确认(连续 p=m_Detection_Recodds_Num 刀)，确认后进入
 // 测向跟踪；只保留已确认欺骗的 (系统,频点) 卫星用于后续测向。
