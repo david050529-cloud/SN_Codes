@@ -1376,9 +1376,13 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             if (cutAlarms.find(kv.first) == cutAlarms.end())
             {
                 kv.second = 0;
-                // 连续报警被打断：过去的跨周期相位差失效，清空该频点基线
-                // （对应 Python baselines[key].clear()）
-                m_Baselines.erase(kv.first);
+                // 连续报警被打断：仅当该 (系统,频点) 尚未确认(未进入跟踪)时才清空基线；
+                // 已确认(跟踪中)的信号即使本刀聚类未达阈值(如严格阈值的 Galileo E1C
+                // 某刀只聚集 3 颗)，也保留跨刀/跨周期累积的相位差(对应 Python 同修复)。
+                if (m_Tracking.find(kv.first) == m_Tracking.end())
+                {
+                    m_Baselines.erase(kv.first);
+                }
             }
         }
         // 2. 本刀报警的 (系统,频点) 连续 +1；达到 p 次确认进入跟踪
