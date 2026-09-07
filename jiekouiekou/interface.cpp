@@ -2635,7 +2635,19 @@ int GetResult_GN902(int id, SpoofingResult& result){
 // @param id 算法id
 // @return 正确运行返回0，错误id返回1
 int Release_GN902(int id){
-	return 0;
+    Log("Release_GN902 begin,id=%d\n",id);
+
+    if(id < 0 || id >= GN902Container.size() || !GN902Container[id]){
+        Log("Release_GN902 failed\n");
+        return 1;
+    }
+
+    GN902* p = GN902Container[id];
+    delete p;
+    GN902Container[id] = nullptr;
+
+    Log("Release_GN902 success,id=%d\n",id);
+    return 0;
 }
 
 

@@ -1,0 +1,103 @@
+# =============================================================================
+# SpoofingDoa 欺骗测向 DLL 配置文件
+# 格式: key=value （'#' 后为注释）
+# 运行时路径: 与 DLL 同目录的 ./DoaBSpoofingConfig.txt
+# =============================================================================
+
+# 日志输出路径前缀
+logAdr=./spoofingDoaLog_
+
+# 日志标签: 0=无需日志 1=清空重写 2=追加
+logFlg=0
+
+# 天线阵元个数
+antennaNum=7
+
+# 角度门限(度): 同一方向判定阈值
+angleThreshold=3.0
+
+# 相位差门限(度): 相位差相近判定阈值
+phaseDiffThreshold=5.0
+
+# 天线类型: 0=全向 1=定向
+antennaType=0
+
+# 一刀帧数(每个切刀位置采集的帧数); 循环切刀检测建议 8(每刀 8 秒 8 帧)
+cutFrams=8
+
+# 平滑标签: 0=不平滑(取最后一帧) 1=平滑(稳定性过滤+圆形均值)
+smoothFlg=1
+
+# 用于测向的刀数
+doaCutNum=6
+
+# 欺骗检测的卫星颗数默认阈值(严格大于判定，触发≥3；对应 Python 默认 countThreshold=2)
+detectionNum=2
+
+# 伪谱积分标签: 0=不积分 1=积分
+pseudoSpectrumFlag=0
+
+# 测向中欺骗检测模式: 0=不检测 1=每刀独立 2=合并
+doaDetectionFlag=0
+
+# 循环切刀检测流程开关: 0=关闭(用 doaDetectionFlag) 1=开启(每刀聚类+跨刀连续确认+测向跟踪)
+# 开启时对应 Python detection_main.py / detection_lib.py 循环切刀流程
+cyclicDetectionFlag=1
+
+# 测向质量门限(低于此值丢弃)
+qulityThreshold=0.0
+
+# 载噪比门限(dB-Hz): 低于此值的卫星数据不参与处理
+snrThreshold=35.0
+
+# 虚拟孔径标签: 0=不使用 1=使用虚拟阵列扩展
+virtualFlag=0
+
+# 虚拟阵列扩展倍数
+virtualMultiple=0.94
+
+# 原始数据保存标签
+saveOriginalFlg=0
+
+# 测向算法: 1=相关干涉仪 2=幅相法 3=干涉仪+阵列仿真
+doaArithmetic=1
+
+# 数据删除标签: 0=保留部分有效 1=要求全部刀有效
+deletePrnFlag=1
+
+# 二次确认标签: 0=进行二次确认 1=不进行
+secondaryDoaFlag=0
+
+# 根据外部欺骗检测结果筛选标签
+screendetectionFlag=0
+
+# 用载噪比确定测向天线序号标签
+getUseAntennaBySnrFlag=0
+
+# 测向结果积分衰减因子(0-1)
+accumulateMultiplier=0
+
+# 用于测向的相位差最少数量
+doaMinCutNum=6
+
+# 跳半周修复的质量改善阈值
+detection180QulityThreshold=10.0
+
+# 阵列仿真数据路径
+simulateFile=/simulateData/
+
+# 连续多少刀检测为欺骗才最终判定(跨刀连续确认的 p)
+# 循环切刀检测对应 Python ALARM_CONSECUTIVE_P，建议 2
+detectionRecoddsNum=2
+
+# 数据保存标签
+saveDataFlg=0
+
+# 切刀顺序(RF 开关切换序列)，格式 {{天线1,天线2},...}；同天线对为自校准刀
+cutThw={{1,1},{1,2},{1,3},{1,4},{1,5},{1,6},{1,7}}
+
+# 阵列仿真数据包含的频率(Hz)
+SimulateFre={{1176e6,1279e6,1561e6,1602e6}}
+
+# 全向天线阵列半径(米)；定向天线改用 Radr= 配置文件路径
+r=0.1865

@@ -148,6 +148,6 @@ EXTERN_C int Create_GN902(int &id);
 EXTERN_C int SetThresholdDetection_GN902(int id, double phsDiffThreshold, double satelliteCountThreshold, 
             double cutCountThreshold, int sysEnum, int typeEnum);
 EXTERN_C int SetData_GN902(int id, const GNSSData* data, int cutIdx, int endFlag);
-EXTERN_C int GetResult_GN902(int id, double& angle);
+EXTERN_C int GetResult_GN902(int id, SpoofingResult& result);
 EXTERN_C int Release_GN902(int id);
 #endif
