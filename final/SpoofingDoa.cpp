@@ -24,18 +24,19 @@ SpoofingDoa::SpoofingDoa(void){
     // 部分频点的检测阈值单独设置，与 Python detection_lib.ORIGINAL_CONFIG_TEXT 规则一致
     // （2026-09 对齐：GLONASS G1/G2、BDS B1C 的颗数阈值已按 Python 修正）
     // 判定为严格大于（bestCount > m_Detection_Threshold），对应 Python 的 cnt > count_thr
-    setThresholdDetectionDoa(4, -1, 0, 2);    // GPS L5:     Python Sys=0,Type=2  count=4(触发≥5)
-    setThresholdDetectionDoa(2, 5.0, 1, 0);   // GLONASS G1: Python Sys=1,Type=0  count=2(触发≥3) phs=5.0
-    setThresholdDetectionDoa(3, 5.0, 1, 1);   // GLONASS G2: Python Sys=1,Type=1  count=3(触发≥4) phs=5.0
-    setThresholdDetectionDoa(3, 3.6, 3, 2);   // Galileo E1C: Python Sys=3,Type=2 count=3(触发≥4) phs=3.6
-    setThresholdDetectionDoa(4, 3.6, 3, 12);  // Galileo E5a: Python Sys=3,Type=12 count=4(触发≥5) phs=3.6
-    setThresholdDetectionDoa(4, 3.6, 3, 17);  // Galileo E5b: Python Sys=3,Type=17 count=4(触发≥5) phs=3.6
-    setThresholdDetectionDoa(3, -1, 4, 17);   // BDS B2I:     Python Sys=4,Type=17 count=3(触发≥4)
-    setThresholdDetectionDoa(3, -1, 4, 0);    // BDS B1I:     Python Sys=4,Type=0  count=3(触发≥4)
-    setThresholdDetectionDoa(3, -1, 4, 2);    // BDS B3I:     Python Sys=4,Type=2  count=3(触发≥4)
-    setThresholdDetectionDoa(2, -1, 4, 8);    // BDS B1C:     Python Sys=4,Type=8  count=2(触发≥3)（新增）
-    setThresholdDetectionDoa(3, -1, 4, 19);   // BDS B2b:     Python Sys=4,Type=19 count=3(触发≥4)
-    setThresholdDetectionDoa(3, 3.6, 4, 34);  // BDS B1X:     Python Sys=4,Type=34 count=3(触发≥4) phs=3.6
+    // 实参顺序固定为: (系统sys, 频点type, 卫星颗数阈值threshold, 相位差阈值phsThreshold)
+    setThresholdDetectionDoa(0, 2, 4, -1);    // GPS L5:     Python Sys=0,Type=2  count=4(触发≥5)
+    setThresholdDetectionDoa(1, 0, 2, 5.0);   // GLONASS G1: Python Sys=1,Type=0  count=2(触发≥3) phs=5.0
+    setThresholdDetectionDoa(1, 1, 3, 5.0);   // GLONASS G2: Python Sys=1,Type=1  count=3(触发≥4) phs=5.0
+    setThresholdDetectionDoa(3, 2, 3, 3.6);   // Galileo E1C: Python Sys=3,Type=2 count=3(触发≥4) phs=3.6
+    setThresholdDetectionDoa(3, 12, 4, 3.6);  // Galileo E5a: Python Sys=3,Type=12 count=4(触发≥5) phs=3.6
+    setThresholdDetectionDoa(3, 17, 4, 3.6);  // Galileo E5b: Python Sys=3,Type=17 count=4(触发≥5) phs=3.6
+    setThresholdDetectionDoa(4, 17, 3, -1);   // BDS B2I:     Python Sys=4,Type=17 count=3(触发≥4)
+    setThresholdDetectionDoa(4, 0, 3, -1);    // BDS B1I:     Python Sys=4,Type=0  count=3(触发≥4)
+    setThresholdDetectionDoa(4, 2, 3, -1);    // BDS B3I:     Python Sys=4,Type=2  count=3(触发≥4)
+    setThresholdDetectionDoa(4, 8, 2, -1);    // BDS B1C:     Python Sys=4,Type=8  count=2(触发≥3)（新增）
+    setThresholdDetectionDoa(4, 19, 3, -1);   // BDS B2b:     Python Sys=4,Type=19 count=3(触发≥4)
+    setThresholdDetectionDoa(4, 34, 3, 3.6);  // BDS B1X:     Python Sys=4,Type=34 count=3(触发≥4) phs=3.6
     // setTypeDetectionBySnr(1, 1, 0);
 }
 
@@ -1143,12 +1144,12 @@ void SpoofingDoa::setR(const string adr){
 
 
 // 设置告警门限
-// @param threshold 卫星颗数阈值
-// @param phsThreshold 相位差阈值(单位:度)
 // @param sys 卫星系统(-1表示所有系统)
 // @param type 卫星频点(-1表示所有频点)
+// @param threshold 卫星颗数阈值
+// @param phsThreshold 相位差阈值(单位:度)
 // @note 当卫星系统和卫星频点均为-1时，表示对所有卫星系统和频率进行告警检测，否则对一个卫星系统和一个固定频率进行告警检测
-void SpoofingDoa::setThresholdDetectionDoa(int threshold, double phsThreshold, int sys, int type)
+void SpoofingDoa::setThresholdDetectionDoa(int sys, int type, int threshold, double phsThreshold)
 {
     PublicSpace::Log("Sys=%i,Type=%i,coutThreshold=%i,phsThreshold=%.1f\n", sys, type, threshold, phsThreshold);
     if (-1 == sys && -1 == type)

@@ -98,8 +98,8 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
         return;
     }
     SpoofingDoa *eng = it->second->eng;
-    // 卫星数阈值(satelliteCountThreshold)+相位差阈值(phsDiffThreshold)，作用于指定(系统,频点)
-    eng->setThresholdDetectionDoa((int)satelliteCountThreshold, phsDiffThreshold, sysEnum, typeEnum);
+    // 参数顺序: (系统sysEnum, 频点typeEnum, 卫星数阈值satelliteCountThreshold, 相位差阈值phsDiffThreshold)
+    eng->setThresholdDetectionDoa(sysEnum, typeEnum, (int)satelliteCountThreshold, phsDiffThreshold);
     // cutCountThreshold = 连续确认刀数 p(对应 ALARM_CONSECUTIVE_P)，>0 时生效
     if (cutCountThreshold > 0)
     {

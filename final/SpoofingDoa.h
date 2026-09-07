@@ -117,11 +117,12 @@ public:
     void Init(void); // 初始化: 读取配置、初始化频率表、理论相位差、检测历史记录等
 
     // 设置相位差阈值(欺骗检测门限)
-    // @param threshold: 卫星颗数阈值，达到该数量则判定为欺骗
-    // @param phsThreshold: 相位差阈值(单位:度)，相位差在该范围内的卫星判定为同源
     // @param sys: 卫星系统(-1表示所有系统)
     // @param type: 卫星频点(-1表示所有频点)
-    void setThresholdDetectionDoa(int threshold, double phsThreshold, int sys, int type);
+    // @param threshold: 卫星颗数阈值，达到该数量则判定为欺骗
+    // @param phsThreshold: 相位差阈值(单位:度)，相位差在该范围内的卫星判定为同源
+    // 参数顺序: (系统sys, 频点type, 卫星颗数阈值threshold, 相位差阈值phsThreshold)
+    void setThresholdDetectionDoa(int sys, int type, int threshold, double phsThreshold);
 
     // 设置需要加入载噪比进行欺骗检测的频点
     void setTypeDetectionBySnr(int thresholdNum, int sys, int type);
