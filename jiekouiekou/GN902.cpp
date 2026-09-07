@@ -9,8 +9,8 @@ using namespace std;
 // =============================================================================
 // 每个 GN902 实例的内部状态(引擎 + 整轮帧缓冲)。
 // 以对象地址索引存放在文件内容器中，避免改动 GN902.h 中已有的类定义/成员。
-//   eng       : SpoofingDoa 引擎。构造时即 initProject()+Init()(读取 ./DoaBSpoofingConfig.txt，
-//               并按 Python 流程阈值初始化各频点)。引擎内部持跨轮(跨周期)状态:
+//   eng       : SpoofingDoa 引擎。构造时即 initProject()+Init()(运行参数内置在引擎代码中，
+//               不读取外部配置文件)，并按 Python 流程阈值初始化各频点)。引擎内部持跨轮(跨周期)状态:
 //               m_ConsecutiveAlarm / m_Tracking / m_Baselines，在本类多轮调用间持续累积。
 //   buf/cuts  : 当前轮逐帧送来的 GNSSData 与对应 cutIdx(通道2天线号 1..7)。
 //   calFrames : 已储存的校正刀(cutIdx=1 / 天线对{1,1})数据，每轮出现校正刀则整体刷新。
@@ -59,7 +59,7 @@ std::vector<GN902 *> GN902Container;
 
 GN902::GN902(){
     GN902State *st = new GN902State();
-    // SpoofingDoa 构造即 initProject()+Init()：读取 ./DoaBSpoofingConfig.txt 完成初始化，
+    // SpoofingDoa 构造即 initProject()+Init()：运行参数已内置在引擎 Init() 中(不读配置文件)，
     // 并按 Python 流程对齐各频点阈值。
     st->eng = new SpoofingDoa();
     if (st->eng != 0)

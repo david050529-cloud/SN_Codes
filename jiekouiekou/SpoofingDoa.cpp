@@ -7,16 +7,16 @@
 //           3. getAngleSpoofingDoa:输出最终测向结果，支持伪谱积分和外部筛选
 //           4. setDataAngle:测向主流程(相位差计算→校正→检测→干涉仪/幅相法测向)
 //           5. setDataAlarm:欺骗检测模式流程(相位差计算→按频点分类→三方法检测)
-//           6. setConfigData:读取配置文件解析所有运行参数
-//           7. calAngle:干涉仪测向汇总(按频点逐星计算+跳半周检测与修复)
-//           8. 跳半周检测与优化:检测相位跳变并使用全排列组合进行修复
+//           6. calAngle:干涉仪测向汇总(按频点逐星计算+跳半周检测与修复)
+//           7. 跳半周检测与优化:检测相位跳变并使用全排列组合进行修复
+// 配置说明: 各运行参数(阵列/切刀/阈值/流程开关)直接在 Init() 中内置, 不读取外部配置文件
 // =============================================================================
 #include "SpoofingDoa.h"
 #include "pch.h"
 
 
 // 欺骗测向算法对象构造函数
-// 初始化流程: initProject(设置硬件参数) -> Init(读取配置+频率表+理论模板)
+// 初始化流程: initProject(设置硬件参数) -> Init(内置运行参数+频率表+理论模板)
 SpoofingDoa::SpoofingDoa(void){
     initProject();
     Init();
@@ -43,7 +43,7 @@ SpoofingDoa::SpoofingDoa(void){
 // 完整初始化函数(可重复调用)
 // 初始化顺序:
 // 1. 清空累积数据(伪谱积分、校正数据、历史记录)
-// 2. 读取配置文件设置所有运行参数(setConfigData)
+// 2. 内置运行参数(原 DoaBSpoofingConfig.txt 内容, 直接内嵌于本函数)
 // 3. 初始化GNSS频点频率映射表(initType)
 // 4. 设置各频点阵列半径(setR)
 // 5. 初始化检测阈值(initDetectionThreshold)
@@ -62,9 +62,76 @@ void SpoofingDoa::Init(void){
     m_infoData180.clear();
     std::map<int, std::map<int, InterferInfo>>().swap(m_infoData180);
 
-    // 读取配置文件(默认路径 ./DoaBSpoofingConfig.txt)
-    string tp_config_adr = "./DoaBSpoofingConfig.txt";
-    setConfigData(tp_config_adr);
+    // =========================================================================
+    // 内置运行参数(不读取外部配置文件)
+    // 以下取值与原始 DoaBSpoofingConfig.txt(2026-09 快照) 逐项一致，直接内嵌在代码中，
+    // 消除运行时对配置文件的依赖；需要调整参数时改这里即可(括号内为原配置文件 key)。
+    // 说明: initProject() 默认走 GN930U 分支(半径0.2/切刀{7,7}...)，此处按下方的
+    //       GN902 配置覆盖，之后 setR()/initTheory() 按覆盖后的 m_omni_R 重建理论模板。
+    // =========================================================================
+
+    // ---- 日志: logAdr / logFlg ----
+    m_LogFile = "./spoofingDoaLog_";
+    PublicSpace::m_logFlg = 0;   // 0=关闭日志
+    LogCreat(m_LogFile);
+
+    // ---- 阵列物理参数: antennaNum / antennaType / r ----
+    m_AntennaNum = 7;            // 天线阵元个数
+    m_antnenaType = 0;           // 0=全向天线, 1=定向天线
+    m_omni_R = 0.1865;           // 全向天线阵列半径(米) = GN902 硬件参数(与 Python ARRAY_RADIUS 一致)
+    m_Radr.clear();              // 定向天线半径文件路径(全向天线不使用)
+
+    // ---- 切刀顺序: cutThw ----
+    // {1,1} = 自校准刀(天线对相同，用于通道校正，不参与测向)，
+    // {1,2}~{1,7} = 六刀测向基线(对应 Python code 0/9/57/17/25/33/1)。
+    m_cutSequence = { {1,1}, {1,2}, {1,3}, {1,4}, {1,5}, {1,6}, {1,7} };
+
+    // ---- 平滑/帧数: cutFrams / smoothFlg ----
+    m_OneCut_Frams = 8;          // 一刀帧数(循环切刀检测每刀 8 帧, 与 dat 8 帧/刀一致)
+    m_Smooth_Flag = 1;           // 1=多帧平滑(稳定性过滤+圆形均值)
+
+    // ---- 测向刀数/最少相位差数: doaCutNum / doaMinCutNum ----
+    m_Doa_Cut_Num = 6;
+    m_Doa_Cut_min_Num = 6;
+    if (m_Doa_Cut_min_Num >= (int)m_cutSequence.size()) {
+        m_Doa_Cut_min_Num = (int)m_cutSequence.size() - 1;  // 自动限制不超过总刀数-1
+    }
+
+    // ---- 检测门限: angleThreshold / phaseDiffThreshold / detectionNum / snrThreshold ----
+    m_Angle_Threshold = 3.0;     // 同一方向判定阈值(度)
+    m_Phasediff_Threshold = 5.0; // 相位差相近判定阈值(度)
+    m_Detection_Threshold_Num = 2; // 卫星颗数默认阈值(严格大于判定, 触发≥3)
+    m_Snr_Threshold = 35.0;      // 载噪比门限(dB-Hz), 低于该值不参与处理
+    m_Qulity_Threshold = 0.0;    // 测向质量门限
+
+    // ---- 流程开关 ----
+    m_Cyclic_Detection_Flag = 1; // cyclicDetectionFlag: 1=循环切刀检测(每刀聚类+跨刀连续确认+测向跟踪)
+    m_Doa_Detection_Flag = 0;    // doaDetectionFlag: 0=测向中不额外做欺骗检测(循环流程覆盖)
+    m_Doa_Arithmetic = 1;        // doaArithmetic: 1=相关干涉仪
+    m_PseudoSpectrum_Flag = 0;   // pseudoSpectrumFlag: 0=不做伪谱积分
+    m_Screen_detection_Flag = 0; // screendetectionFlag: 0=不按外部欺骗结果筛选
+    m_Secondary_Doa_Flag = 0;    // secondaryDoaFlag: 0=进行二次确认测向
+    m_Delete_Prn_Flag = 1;       // deletePrnFlag: 1=删除存在缺失刀数据的卫星
+    m_getUseAntennaBySnr_Flag = 0; // getUseAntennaBySnrFlag: 0=不用载噪比定测向天线序号
+
+    // ---- 虚拟阵列: virtualFlag / virtualMultiple ----
+    m_Virtual_Flag = 0;          // 0=不使用虚拟阵列
+    m_Virtual_Multiple = 0.94;   // 虚拟阵列扩展倍数(未使用)
+
+    // ---- 跨刀连续确认: detectionRecoddsNum ----
+    m_Detection_Recodds_Num = 2; // 连续多少刀判为欺骗才最终确认(对应 Python ALARM_CONSECUTIVE_P)
+
+    // ---- 跳半周修复阈值: detection180QulityThreshold ----
+    m_Detection180_Qulity_Threshold = 10.0;
+
+    // ---- 数据保存: saveOriginalFlg / saveDataFlg / accumulateMultiplier ----
+    m_Save_Original_Flg = 0;     // 0=不保存原始GNSS数据
+    PublicSpace::m_save_data_Flg = 0; // 0=不保存数据
+    m_Accumulate_multiplier = 0; // 伪谱积分衰减因子(未启用积分)
+
+    // ---- 阵列仿真(仅 doaArithmetic=2/3 使用, 干涉仪+全向不依赖): simulateFile / SimulateFre ----
+    m_Simulate_Data_file = "/simulateData/";
+    m_All_Simulate_data_Fre = {1176e6, 1279e6, 1561e6, 1602e6};
     // 初始化GNSS频点频率映射表(m_F)
     initType();
     // 初始化循环切刀检测状态(连续报警计数与跟踪)
@@ -1116,179 +1183,6 @@ void SpoofingDoa::setTypeDetectionBySnr(int thresholdNum, int sys, int type)
 }
 
 
-// =========================================================================
-// 读取配置文件并设置相关参数
-// 配置文件格式: key=value 每行一个参数
-// 配置参数包括:天线数量、角度阈值、相位差阈值、算法类型、切刀顺序等
-// =========================================================================
-void SpoofingDoa::setConfigData(const string adr)
-{
-    map<string, string> configMap;
-    int flg = readConfigtxt(adr, configMap);
-
-    if (0 != flg)
-    {
-        return;
-    }
-
-    // 将读取的配置参数写入参数中
-
-    // 日志地址
-    (void)getMapData(configMap, "logAdr", m_LogFile);
-
-    // 日志标签 0 - 无需日志 1 - 清空重写 2 - 追加
-    (void)getMapData(configMap, "logFlg", m_logFlg);
-
-    LogCreat(m_LogFile);
-
-    // 算法版本
-    PublicSpace::Log("SpoofingDoa Version:%s\n", Version);
-
-    // 天线数量
-    (void)getMapData(configMap, "antennaNum", m_AntennaNum);
-    PublicSpace::Log("antennaNum=%d\n", m_AntennaNum);
-
-    // 角度门限(同一方向判定阈值，度)
-    (void)getMapData(configMap, "angleThreshold", m_Angle_Threshold);
-    PublicSpace::Log("angleThreshold=%.1f\n", m_Angle_Threshold);
-
-    // 相差门限(相位差相近判定阈值，度)
-    (void)getMapData(configMap, "phaseDiffThreshold", m_Phasediff_Threshold);
-    PublicSpace::Log("phaseDiffThreshold=%.5f\n", m_Phasediff_Threshold);
-
-    // 天线类型(0=全向, 1=定向)
-    (void)getMapData(configMap, "antennaType", m_antnenaType);
-    PublicSpace::Log("antennaType=%d\n", m_antnenaType);
-
-    // 一刀帧数(每个切刀位置采集的帧数)
-    (void)getMapData(configMap, "cutFrams", m_OneCut_Frams);
-    PublicSpace::Log("cutFrams=%d\n", m_OneCut_Frams);
-
-    // 平滑标签(0=不平滑, 1=平滑)
-    (void)getMapData(configMap, "smoothFlg", m_Smooth_Flag);
-    PublicSpace::Log("smoothFlg=%d\n", m_Smooth_Flag);
-
-    // 切刀数量(用于测向的刀数)
-    (void)getMapData(configMap, "doaCutNum", m_Doa_Cut_Num);
-    PublicSpace::Log("doaCutNum=%d\n", m_Doa_Cut_Num);
-
-    // 检测门限(欺骗检测的卫星颗数阈值)
-    (void)getMapData(configMap, "detectionNum", m_Detection_Threshold_Num);
-    PublicSpace::Log("detectionNum=%d\n", m_Detection_Threshold_Num);
-
-    // 伪谱积分标签(0=不积分, 1=积分)
-    (void)getMapData(configMap, "pseudoSpectrumFlag", m_PseudoSpectrum_Flag);
-    PublicSpace::Log("pseudoSpectrumFlag=%d\n", m_PseudoSpectrum_Flag);
-
-    // 检测标签(测向中是否进行欺骗检测)
-    (void)getMapData(configMap, "doaDetectionFlag", m_Doa_Detection_Flag);
-    PublicSpace::Log("doaDetectionFlag=%d\n", m_Doa_Detection_Flag);
-
-    // 循环切刀检测标签(是否使用循环切刀检测流程)
-    (void)getMapData(configMap, "cyclicDetectionFlag", m_Cyclic_Detection_Flag);
-    PublicSpace::Log("cyclicDetectionFlag=%d\n", m_Cyclic_Detection_Flag);
-
-    // 质量门限(低于此值的结果丢弃)
-    (void)getMapData(configMap, "qulityThreshold", m_Qulity_Threshold);
-    PublicSpace::Log("qulityThreshold=%.1f\n", m_Qulity_Threshold);
-
-    // 信噪比门限(低于此值的数据丢弃)
-    (void)getMapData(configMap, "snrThreshold", m_Snr_Threshold);
-    PublicSpace::Log("snrThreshold=%.1f\n", m_Snr_Threshold);
-
-    // 虚拟孔径标签(0=不使用, 1=使用虚拟阵列扩展)
-    (void)getMapData(configMap, "virtualFlag", m_Virtual_Flag);
-    PublicSpace::Log("virtualFlag=%d\n", m_Virtual_Flag);
-
-    // 虚拟空间倍数
-    (void)getMapData(configMap, "virtualMultiple", m_Virtual_Multiple);
-    PublicSpace::Log("virtualMultiple=%.2f\n", m_Virtual_Multiple);
-
-    // 原始数据保存标签
-    (void)getMapData(configMap, "saveOriginalFlg", m_Save_Original_Flg);
-    PublicSpace::Log("saveOriginalFlg=%.2f\n", m_Save_Original_Flg);
-
-    // 算法类型(1=干涉仪, 2=幅相法, 3=干涉仪+仿真)
-    (void)getMapData(configMap, "doaArithmetic", m_Doa_Arithmetic);
-    PublicSpace::Log("doaArithmetic=%d\n", m_Doa_Arithmetic);
-
-    // 数据删除标签(0=保留部分有效, 1=要求全部有效)
-    (void)getMapData(configMap, "deletePrnFlag", m_Delete_Prn_Flag);
-    PublicSpace::Log("deletePrnFlag=%d\n", m_Delete_Prn_Flag);
-
-    // 二次确认标签(0=进行二次确认, 1=不进行)
-    (void)getMapData(configMap, "secondaryDoaFlag", m_Secondary_Doa_Flag);
-    PublicSpace::Log("secondaryDoaFlag=%d\n", m_Secondary_Doa_Flag);
-
-    // 欺骗检测结果筛选标签
-    (void)getMapData(configMap, "screendetectionFlag", m_Screen_detection_Flag);
-    PublicSpace::Log("screendetectionFlag=%d\n", m_Screen_detection_Flag);
-
-    // 用载噪比确定用于测向的天线序号的标签
-    (void)getMapData(configMap, "getUseAntennaBySnrFlag", m_getUseAntennaBySnr_Flag);
-    PublicSpace::Log("getUseAntennaBySnrFlag=%d\n", m_getUseAntennaBySnr_Flag);
-
-    // 测向结果积分因子(伪谱指数衰减系数)
-    (void)getMapData(configMap, "accumulateMultiplier", m_Accumulate_multiplier);
-    PublicSpace::Log("accumulateMultiplier=%.2f\n", m_Accumulate_multiplier);
-
-    // 用于测向的相位差的最少数量
-    (void)getMapData(configMap, "doaMinCutNum", m_Doa_Cut_min_Num);
-    PublicSpace::Log("doaMinCutNum=%d\n", m_Doa_Cut_min_Num);
-
-    // 当修复跳半周后的欺骗测向阈值，比前一次测向结果要大于该值才替换为修复后的测向结果
-    (void)getMapData(configMap, "detection180QulityThreshold", m_Detection180_Qulity_Threshold);
-    PublicSpace::Log("detection180QulityThreshold=%.2f\n", m_Detection180_Qulity_Threshold);
-
-    // 阵列仿真数据路径
-    (void)getMapData(configMap, "simulateFile", m_Simulate_Data_file);
-    PublicSpace::Log("simulateFile=%s\n", m_Simulate_Data_file.c_str());
-
-    // 欺骗检测记录个数，当连续个数均检测为欺骗信号时，才判定为欺骗信号
-    (void)getMapData(configMap, "detectionRecoddsNum", m_Detection_Recodds_Num);
-    PublicSpace::Log("detectionRecoddsNum=%d\n", m_Detection_Recodds_Num);
-
-    // 数据保存标签
-    (void)getMapData(configMap, "saveDataFlg", m_save_data_Flg);
-    PublicSpace::Log("saveDataFlg=%d\n", m_save_data_Flg);
-
-    // 切刀方式(RF开关切换顺序)
-    string tp;
-    int flg2 = getMapData(configMap, "cutThw", tp);
-
-    if (flg2 == 0){
-        string2Vector(tp, m_cutSequence);  // 解析切刀顺序字符串
-        int cutSequence_num = m_cutSequence.size();
-        // 如果最小测向刀数超过总刀数，自动调整为总刀数-1
-        if (m_Doa_Cut_min_Num >= cutSequence_num){
-            m_Doa_Cut_min_Num = cutSequence_num - 1;
-            PublicSpace::Log("doaMinCutNum=%d\n", m_Doa_Cut_min_Num);
-        }
-    }
-
-
-    // 仿真数据频率
-    string tp2;
-    vector<vector<double>> tp4;
-    int flg3 = getMapData(configMap, "SimulateFre", tp2);
-
-    if (flg3 == 0)
-    {
-        string2Vector(tp, tp4);
-        m_All_Simulate_data_Fre = tp4[0];
-    }
-
-
-    // 孔径设置
-    if (m_antnenaType == 0)
-    {
-        getMapData(configMap, "r", m_omni_R);  // 全向天线:统一半径
-    }
-    else
-    {
-        getMapData(configMap, "Radr", m_Radr);  // 定向天线:半径配置文件路径
-    }
-}
 
 // =========================================================================
 // 清空循环切刀检测的连续报警计数与跟踪状态（对应 Python consecutive / tracking）

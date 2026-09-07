@@ -242,8 +242,6 @@ private:
     void getAlarm(const std::map<int, std::vector<SatelliteDataPhaseDiffA>> &dataT);
     // 设置各频点的阵列半径(全向天线使用统一半径，定向天线使用频率相关半径)
     void setR(const string adr);
-    // 读取配置文件并解析所有配置参数
-    void setConfigData(const string adr);
     // 根据天线对选择构建InterferInfo结构(排除无效数据，应用虚拟阵列)
     void calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, InterferInfo &info, int &doaFlg);
     // 多帧数据平滑(排除异常值后取均值)
