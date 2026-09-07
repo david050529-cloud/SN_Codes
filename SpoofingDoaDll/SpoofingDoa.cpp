@@ -389,6 +389,20 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
     getSatelliteDataPhaseDiffB(dataA, dataB);
     LogSatelliteDataPhaseDiffB(dataB);
 
+    // 步骤6.5: 跨周期基线累积(循环检测)：本轮相位差合并进持久基线，缺刀位复用
+    // 上一周期的相位差，凑齐 6 条基线做测向(对应 Python baselines 跨周期复用)。
+    vector<SatelliteDataPhaseDiffB> doaDataB;
+    doaDataB.clear();
+    if (m_Cyclic_Detection_Flag != 0)
+    {
+        accumulateBaselines(dataB);      // 本轮相位差合并进持久基线
+        getCrossCycleDataB(doaDataB);    // 取当前跟踪中(系统,频点)的累积基线做测向
+    }
+    else
+    {
+        doaDataB = dataB;                // 非循环检测：保持单轮测向原行为
+    }
+
     // 步骤7: 根据算法类型调用对应的DOA计算
     if (1 == m_Doa_Arithmetic || 3 == m_Doa_Arithmetic){
 
@@ -397,7 +411,7 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
             return;
         }
 
-        getResultInterferDoa(dataB);  // 相关干涉仪测向
+        getResultInterferDoa(doaDataB);  // 相关干涉仪测向
     }
 
     if (2 == m_Doa_Arithmetic){
@@ -407,7 +421,7 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
             return;
         }
 
-        getResultAmpPhaseDoa(dataB);  // 幅相法测向
+        getResultAmpPhaseDoa(doaDataB);  // 幅相法测向
     }
 
     // 步骤8: 更新循环切刀跟踪状态中的最近一次 DOA（对应 Python tracking 的 last_doa）
@@ -1283,6 +1297,7 @@ void SpoofingDoa::resetCyclicDetection(void)
 {
     m_ConsecutiveAlarm.clear();
     m_Tracking.clear();
+    m_Baselines.clear();   // 跨周期测向基线一并清空
 }
 
 // =========================================================================
@@ -1361,6 +1376,9 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             if (cutAlarms.find(kv.first) == cutAlarms.end())
             {
                 kv.second = 0;
+                // 连续报警被打断：过去的跨周期相位差失效，清空该频点基线
+                // （对应 Python baselines[key].clear()）
+                m_Baselines.erase(kv.first);
             }
         }
         // 2. 本刀报警的 (系统,频点) 连续 +1；达到 p 次确认进入跟踪
@@ -1397,6 +1415,67 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             }
         }
         dataA[j] = filtered;
+    }
+}
+
+// =========================================================================
+// 把本轮 dataB 合并进跨周期测向基线(相位差跨轮复用做测向)
+// 对应 Python detection_main.py 的 baselines 累积：
+//   - 每轮对同一 (系统,频点,卫星号)，仅覆盖本轮载噪比有效的刀位相位差；
+//     本轮缺失(载噪比=0)的刀位保留上一周期的相位差，从而凑齐 6 条基线。
+//   - 前提：校正偏移相邻轮基本稳定(与 Python 跨周期复用一致)。
+// =========================================================================
+void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB> &dataB)
+{
+    for (const auto &b : dataB)
+    {
+        int typeInt = TypeInt(b.i_Sys, b.i_Type);
+        int prn = b.i_Prn;
+        auto &inner = m_Baselines[typeInt];
+        auto itp = inner.find(prn);
+        if (itp == inner.end())
+        {
+            inner[prn] = b;  // 新卫星：整体初始化
+            continue;
+        }
+        SatelliteDataPhaseDiffB &acc = itp->second;
+        acc.i_diffLen = b.i_diffLen;
+        for (int j = 0; j < b.i_diffLen && j < 100; ++j)
+        {
+            if (b.i_Snr1[j] > 1e-6 && b.i_Snr2[j] > 1e-6)
+            {
+                acc.i_phase_diff[j] = b.i_phase_diff[j];
+                acc.i_Snr1[j] = b.i_Snr1[j];
+                acc.i_Snr2[j] = b.i_Snr2[j];
+            }
+        }
+    }
+}
+
+// =========================================================================
+// 取出当前跟踪中(系统,频点)的跨周期累积基线，作为测向输入
+// 对应 Python run_doa_one：只对 tracking.cluster_sats 里的卫星做基线测向。
+// =========================================================================
+void SpoofingDoa::getCrossCycleDataB(std::vector<SatelliteDataPhaseDiffB> &doaDataB)
+{
+    doaDataB.clear();
+    for (const auto &kv : m_Tracking)
+    {
+        int typeInt = kv.first;
+        const TrackingInfo &t = kv.second;
+        auto itt = m_Baselines.find(typeInt);
+        if (itt == m_Baselines.end())
+        {
+            continue;
+        }
+        for (int prn : t.cluster_sats)
+        {
+            auto itp = itt->second.find(prn);
+            if (itp != itt->second.end())
+            {
+                doaDataB.emplace_back(itp->second);
+            }
+        }
     }
 }
 

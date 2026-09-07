@@ -25,6 +25,9 @@
 //      「稳定性过滤+圆形均值」(与 dat 8 帧/刀一致)；不一致时退化为每刀取末尾
 //      (最稳定)一帧喂入。
 //   5. GetResult_GN902 返回该轮后各频点测向角度的圆均值(0..359)；无有效结果 angle=-1。
+//   6. 测向使用跨周期相位差：引擎内 m_Baselines 跨轮累积每刀相位差，缺刀位复用
+//      上一周期的相位差补齐六条基线(对应 Python baselines 跨周期复用，前提是
+//      校正偏移相邻轮基本稳定)。
 // =============================================================================
 #include "interface_GN902.h"
 #include "../publicFunctionDoa/publicFunctionDoa.h"
@@ -316,7 +319,8 @@ int SetData_GN902(int id, const GNSSData *data, int cutIdx, int endFlag)
     }
 
     // 运行一轮：引擎 row0 校正刀用于通道校正，六刀测向刀做检测+测向；
-    // 跨轮 m_ConsecutiveAlarm / m_Tracking 在引擎内持续累积。
+    // 跨轮 m_ConsecutiveAlarm / m_Tracking 在引擎内持续累积；测向相位差经
+    // 引擎内 m_Baselines 跨周期复用，缺刀位用上一周期相位差补齐六条基线。
     ctx->eng->configCyclicRuntime(true, oneCutFrams, smooth, 0.0);
     ctx->eng->setGNSSData(batch.data(), (int)batch.size());
     return 0;

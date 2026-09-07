@@ -346,6 +346,10 @@ private:
     void resetCyclicDetection(void);   // 清空连续报警计数与跟踪状态
     // 每刀相位差聚类检测 + 跨刀连续确认 + 测向持续跟踪（只保留确认欺骗的卫星用于测向）
     void getCyclicDetectionData(std::vector<std::vector<SatelliteDataPhaseDiffA>> &dataA);
+    // 把本轮 dataB 合并进跨周期基线(相位差跨轮复用做测向，对应 Python baselines)
+    void accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB> &dataB);
+    // 取出当前跟踪中(系统,频点)的跨周期累积基线，作为测向输入
+    void getCrossCycleDataB(std::vector<SatelliteDataPhaseDiffB> &doaDataB);
 
     // =========================================================================
     // 日志输出函数(WriteLog.cpp)
@@ -470,6 +474,10 @@ private:
         double quality = -1.0;        // 最近一次测向质量
     };
     std::map<int, TrackingInfo> m_Tracking;   // typeInt -> 跟踪状态
+
+    // 跨周期测向基线累积：typeInt -> prn -> 累积相位差(每刀位保留最新有效值，跨轮复用做测向)。
+    // 对应 Python detection_main 的 baselines：相位差可跨周期复用，前提是校正偏移相邻轮稳定。
+    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;
 
 protected:
     // =========================================================================
