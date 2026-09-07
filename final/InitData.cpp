@@ -35,14 +35,14 @@ void SpoofingDoa::initProject(void)
     {
     case GN902:
         m_AntennaNum = 7;  // 阵列中的天线个数
-        m_Doa_Cut_Num = 7; // 用于测向的刀数
+        m_Doa_Cut_Num = 6; // 用于测向的刀数
         m_Doa_Arithmetic = 1;  // 使用相关干涉仪算法
         m_Doa_Cut_min_Num = 6; // 用于测向的相位差的最少数量
         m_omni_R = 0.1865;    // 全向天线阵列半径(米)
         m_antnenaType = 0;    // 全向天线
         m_cutSequence.clear();
         // 切刀顺序: {7,7}同天线功分(校正), {1,2}~{1,7}天线1与其他天线组成基线
-        m_cutSequence = {{7, 7}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}};
+        m_cutSequence = {{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}};
         break;
     case GN930:
         m_AntennaNum = 7;
@@ -53,7 +53,7 @@ void SpoofingDoa::initProject(void)
         m_antnenaType = 0;
         m_cutSequence.clear();
         // GN930的切刀顺序: 中间多一个{7,7}校正刀(双板卡各需要一次校正)
-        m_cutSequence = {{7, 7}, {1, 2}, {1, 3}, {1, 4}, {7, 7}, {1, 5}, {1, 6}, {1, 7}};
+        m_cutSequence = {{1, 1}, {1, 2}, {1, 3}, {1, 4}, {7, 7}, {1, 5}, {1, 6}, {1, 7}};
         break;
     case GN930U:
         m_AntennaNum = 7;
@@ -63,7 +63,7 @@ void SpoofingDoa::initProject(void)
         m_omni_R = 0.2;      // 比GN902/GN930的半径(0.1865m)略大
         m_antnenaType = 0;
         m_cutSequence.clear();
-        m_cutSequence = {{7, 7}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}};
+        m_cutSequence = {{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}};
         break;
     case GN560:
         m_AntennaNum = 7;
