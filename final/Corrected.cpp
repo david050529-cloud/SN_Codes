@@ -57,7 +57,8 @@ void SpoofingDoa::setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>
 //   2. 偏移组合:
 //      - 非 GLONASS: 每个(系统,频点)取各稳定卫星偏移的圆形均值, 存入 prn=-1;
 //      - GLONASS(FDMA): 每颗卫星逐星偏移, 存入对应 prn;
-//   3. 每周期重建 m_CorrectionData(与 Python 每周期重算 cal_rx/cal_glo 一致)。
+//   3. 仅当本轮 {1,1} 校正刀能算出有效偏移时才重建 m_CorrectionData(与 Python 每周期
+//      重算 cal_rx/cal_glo 一致); 无 {1,1} 刀或算不出时保留上一次校正, 沿用其校正。
 // =========================================================================
 void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiffA>> &calCuts)
 {
@@ -84,14 +85,16 @@ void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiff
         }
     }
 
-    m_CorrectionData.clear();  // 重建校正数据
-
+    // 本轮没有 {1,1} 校正刀数据: 不重建, 沿用上一次校正继续校正
     if (nCalCuts <= 0)
     {
         return;
     }
     int required = (nCalCuts < MIN_STABLE_SAMPLES) ? nCalCuts : MIN_STABLE_SAMPLES;
 
+    // 先写入临时容器, 仅当本轮 {1,1} 刀确实算出有效新校正时才整体替换 m_CorrectionData;
+    // 否则(无有效星/全部不稳定)不清空不覆盖, 保留上一次校正值。
+    map<int, map<int, SatelliteDataPhaseDiffA>> newCorrection;
     map<int, vector<double>> freqVals;  // 非 GLONASS: typeInt -> [稳定卫星偏移(度)...]
 
     for (auto &tkv : samples)
@@ -133,7 +136,7 @@ void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiff
             if (sys == 1)
             {
                 // GLONASS(FDMA): 逐卫星偏移
-                m_CorrectionData[typeInt][prn] = tp;
+                newCorrection[typeInt][prn] = tp;
             }
             else
             {
@@ -160,8 +163,17 @@ void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiff
         tp.i_phase_diff = cyc;
         tp.i_Snr1 = 0;
         tp.i_Snr2 = 0;
-        m_CorrectionData[typeInt][-1] = tp;
+        newCorrection[typeInt][-1] = tp;
     }
+
+    // {1,1} 校正刀没能算出任何稳定有效偏移: 保留上一次校正(不清空不覆盖), 沿用其校正。
+    if (newCorrection.empty())
+    {
+        return;
+    }
+
+    // 整体替换为本轮新校正(与 Python 每周期重算 cal_rx/cal_glo 一致)。
+    m_CorrectionData.swap(newCorrection);
 
     // 日志输出校正数据
     for (auto it = m_CorrectionData.begin(); it != m_CorrectionData.end(); ++it)
