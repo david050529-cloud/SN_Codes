@@ -6,6 +6,7 @@
 #include <chrono>
 #include <random>
 #include "json.hpp"
+#include "gn902_dat_parser.h"
 
 // #include <arm_neon.h>
 
@@ -51,6 +52,8 @@ int main139(json jsonData);
 int main141(json jsonData);
 
 int main991(json jsonData);
+
+int main902(json jsonData);
 
 int main(){
 	std::ifstream f("usedConfig.json");
@@ -343,6 +346,9 @@ case 14:
 		default:
 			break;
 	}
+	break;
+case 90:
+	main902(jsonData);
 	break;
 case 99:
 	switch (type) {
@@ -4160,4 +4166,229 @@ int main141(json jsonData){
 	Release_AS(id);
 
 	return 0;
+}
+
+
+// =============================================================================
+// 卫导 GN902 欺骗检测与测向测试
+// 解析 K827 双端口 NovAtel Msg43 dat + 配套 debug 切刀时刻表，构造与欺骗检测/测向
+// 流程传入数据结构一致的 GNSSData，并流式喂入 GN902 引擎验证 C++ 算法。
+//
+// 用法（usedConfig.json）:
+//   "method": 90, "method type": 0
+//   "datDir"          : K827Data_0/1_*.dat 所在目录（与 port0File/port1File 二选一）
+//   "port0File"       : 端口0 dat 文件（可选，优先于 datDir）
+//   "port1File"       : 端口1 dat 文件（可选，优先于 datDir）
+//   "debugFile"       : 切刀时刻表 debug 文件（含 OpenAntenna code 标记）
+//   "logFile"         : 结果日志输出路径（默认 ./gn902_result.log）
+//   "switchSeconds"   : 每刀保留末尾稳定秒数（默认 1，与 Python 流程对齐）
+//   可选阈值覆盖（不设则用引擎默认，与 Python 硬编码阈值一致）:
+//   "phsDiffThreshold" / "satelliteCountThreshold" / "cutCountThreshold" /
+//   "sysEnum" / "typeEnum"
+// =============================================================================
+
+// 同时输出到命令行与日志文件
+static void gn902LogLine(FILE* logFp, const char* fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    if (logFp)
+    {
+        va_start(args, fmt);
+        vfprintf(logFp, fmt, args);
+        va_end(args);
+        fflush(logFp);
+    }
+}
+
+// 打印/记录一轮测向结果
+static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
+{
+    gn902LogLine(logFp, "\n---- 测向轮 %d: 报警频点数 = %d ----\n", round, r.i_Count);
+    for (int i = 0; i < r.i_Count; ++i)
+    {
+        const SatelliteAngle& sa = r.i_SatelliteAngle[i];
+        gn902LogLine(logFp, "  频点 Sys=%d Type=%d Alarm=%d 来向角度=%.2f° 被欺骗卫星数=%d\n",
+                     sa.i_Sys, sa.i_Type, sa.i_Alarm, sa.i_Angle, sa.i_Count);
+        for (int j = 0; j < sa.i_Count; ++j)
+        {
+            const AlarmData& ad = sa.i_AlarmData[j];
+            gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%d Quality=%.2f\n",
+                         ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
+        }
+    }
+}
+
+int main902(json jsonData)
+{
+    using namespace gn902test;
+
+    // ---- 1. 读取配置 ----
+    std::string datDir, port0File, port1File, debugFile, logFile;
+    if (jsonData.count("datDir"))    datDir    = jsonData["datDir"].get<std::string>();
+    if (jsonData.count("port0File")) port0File = jsonData["port0File"].get<std::string>();
+    if (jsonData.count("port1File")) port1File = jsonData["port1File"].get<std::string>();
+    if (jsonData.count("debugFile")) debugFile = jsonData["debugFile"].get<std::string>();
+    logFile = jsonData.count("logFile") ? jsonData["logFile"].get<std::string>() : "./gn902_result.log";
+    int switchSeconds = jsonData.count("switchSeconds") ? jsonData["switchSeconds"].get<int>() : 1;
+
+    // 定位 dat 文件
+    if (port0File.empty() || port1File.empty())
+    {
+        if (datDir.empty())
+        {
+            printf("[GN902] 需提供 datDir 或 port0File/port1File\n");
+            return 1;
+        }
+        if (!findPortDatFiles(datDir, port0File, port1File))
+        {
+            printf("[GN902] 目录缺少 K827Data_0/1_*.dat: %s\n", datDir.c_str());
+            return 1;
+        }
+    }
+    if (debugFile.empty())
+    {
+        printf("[GN902] 需提供 debugFile\n");
+        return 1;
+    }
+
+    printf("================================================================\n");
+    printf("GN902 欺骗检测与测向（解析 K827 双端口 dat 流式喂入）\n");
+    printf("  端口0 dat : %s\n", port0File.c_str());
+    printf("  端口1 dat : %s\n", port1File.c_str());
+    printf("  debug     : %s\n", debugFile.c_str());
+    printf("  日志      : %s\n", logFile.c_str());
+    printf("================================================================\n");
+
+    // ---- 2. 打开结果日志 ----
+    FILE* logFp = fopen(logFile.c_str(), "w");
+
+    // ---- 3. 解析两端口 dat ----
+    std::map<double, std::vector<SatelliteData>> port0 = parseDatPort(port0File);
+    std::map<double, std::vector<SatelliteData>> port1 = parseDatPort(port1File);
+    gn902LogLine(logFp, "端口0 帧数: %d, 端口1 帧数: %d\n", (int)port0.size(), (int)port1.size());
+
+    // ---- 4. 解析切刀时刻表 ----
+    std::vector<std::pair<double, int>> schedule = parseDebugSchedule(debugFile);
+    gn902LogLine(logFp, "切刀切换点: %d 个\n", (int)schedule.size());
+
+    // ---- 5. 公共 GPS 秒 + 赋 code ----
+    std::vector<double> common;
+    for (auto& kv : port0) if (port1.count(kv.first)) common.push_back(kv.first);
+    std::sort(common.begin(), common.end());
+
+    std::vector<std::pair<double, int>> tagged;   // (sec, code)
+    for (double sec : common)
+    {
+        int code = activeCode(sec, schedule);
+        if (code < 0) continue;
+        tagged.push_back({ sec, code });
+    }
+
+    // ---- 6. 按 code 分刀(runs)，每刀去末尾过渡秒、保留末尾 switchSeconds 个稳定秒 ----
+    struct Run { int code; std::vector<double> secs; };
+    std::vector<Run> runs;
+    for (auto& t : tagged)
+    {
+        if (!runs.empty() && runs.back().code == t.second) runs.back().secs.push_back(t.first);
+        else runs.push_back({ t.second, { t.first } });
+    }
+    int settleN = (switchSeconds > 0) ? switchSeconds : 1;
+    std::vector<std::pair<double, int>> feedFrames;   // (sec, code) 时间升序
+    for (auto& run : runs)
+    {
+        std::vector<double> settled;
+        if (run.secs.size() > 1) settled.assign(run.secs.begin(), run.secs.end() - 1);
+        else settled = run.secs;
+        int start = std::max(0, (int)settled.size() - settleN);
+        for (int i = start; i < (int)settled.size(); ++i) feedFrames.push_back({ settled[i], run.code });
+    }
+    gn902LogLine(logFp, "检测喂帧: %d 帧\n", (int)feedFrames.size());
+
+    // ---- 7. 创建 GN902 对象 ----
+    int id = 0, ret = 0;
+    if ((ret = Create_GN902(id)) != 0)
+    {
+        gn902LogLine(logFp, "[GN902] Create_GN902 失败 ret=%d\n", ret);
+        if (logFp) fclose(logFp);
+        return ret;
+    }
+
+    // 可选阈值覆盖（不设则用引擎默认，与 Python 硬编码阈值一致）
+    if (jsonData.count("phsDiffThreshold") && jsonData.count("satelliteCountThreshold"))
+    {
+        double phsTh = jsonData["phsDiffThreshold"].get<double>();
+        double satTh = jsonData["satelliteCountThreshold"].get<double>();
+        double cutTh = jsonData.count("cutCountThreshold") ? jsonData["cutCountThreshold"].get<double>() : 0.0;
+        int sys  = jsonData.count("sysEnum")  ? jsonData["sysEnum"].get<int>()  : -1;
+        int type = jsonData.count("typeEnum") ? jsonData["typeEnum"].get<int>() : -1;
+        ret = SetThresholdDetection_GN902(id, phsTh, satTh, cutTh, sys, type);
+        if (ret != 0) gn902LogLine(logFp, "[GN902] SetThresholdDetection_GN902 失败 ret=%d\n", ret);
+    }
+
+    // ---- 8. 流式喂入 ----
+    // 一轮 = 校正刀(1,1) + 六刀测向(1,2)..(1,7)；校正刀再次出现触发上一轮检测+测向。
+    // 缺刀的轮次（如末尾不完整周期）会被引擎丢弃，与 Python 流程一致。
+    int roundIdx = 0;
+    int doaMask = 0;
+    bool inRound = false;
+    int totalAlarmCount = 0;
+
+    for (auto& fr : feedFrames)
+    {
+        int cutIdx2 = codeToPair(fr.second);
+        if (cutIdx2 < 1 || cutIdx2 > 7) continue;
+
+        auto it0 = port0.find(fr.first);
+        auto it1 = port1.find(fr.first);
+        GNSSData frame = buildGnssData(
+            it0 != port0.end() ? it0->second : std::vector<SatelliteData>(),
+            it1 != port1.end() ? it1->second : std::vector<SatelliteData>());
+
+        if (cutIdx2 == 1)
+        {
+            // 校正刀：先喂（触发上一轮检测+测向），再结算上一轮结果
+            SetData_GN902(id, &frame, 1, 1);
+            if (inRound && (doaMask & 0xFC) == 0xFC)
+            {
+                SpoofingResult r;
+                GetResult_GN902(id, r);
+                gn902LogResult(logFp, roundIdx, r);
+                totalAlarmCount += r.i_Count;
+                roundIdx++;
+            }
+            inRound = true;
+            doaMask = 0;
+        }
+        else
+        {
+            SetData_GN902(id, &frame, 1, cutIdx2);
+            inRound = true;
+            doaMask |= (1 << cutIdx2);
+        }
+    }
+
+    // 末尾完整轮：用一帧空校正触发上一轮检测+测向
+    if (inRound && (doaMask & 0xFC) == 0xFC)
+    {
+        GNSSData dummyCal;
+        memset(&dummyCal, 0, sizeof(dummyCal));
+        SetData_GN902(id, &dummyCal, 1, 1);
+        SpoofingResult r;
+        GetResult_GN902(id, r);
+        gn902LogResult(logFp, roundIdx, r);
+        totalAlarmCount += r.i_Count;
+        roundIdx++;
+    }
+
+    // ---- 9. 汇总 ----
+    gn902LogLine(logFp, "\n================================================================\n");
+    gn902LogLine(logFp, "GN902 检测完成: 处理 %d 个完整测向轮, 共 %d 个报警频点\n", roundIdx, totalAlarmCount);
+    gn902LogLine(logFp, "================================================================\n");
+
+    Release_GN902(id);
+    if (logFp) fclose(logFp);
+    return 0;
 }
