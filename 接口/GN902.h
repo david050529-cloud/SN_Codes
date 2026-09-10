@@ -8,9 +8,9 @@
 // (收纳全部函数实现) 即可单独编译, 无需再引用 Arithmetic/、publicFunctionDoa/、
 // SpoofingDoaDll/ 等外部源文件与头文件(仅依赖 C++ 标准库):
 //   - 接口共享结构 (SatelliteData / GNSSData / AlarmData / SatelliteAngle / SpoofingResult)
-//   - 引擎中间结构 (SatelliteDataPhaseDiffA/B)
-//   - 测向算法基类 ArithmeticDoa (相关干涉仪)
-//   - 公共工具命名空间 PublicSpace (日志 / 角度规整)
+//   - 引擎中间结构 (SatelliteDataPhaseDiffA/B、SingleDeceptiveResult)
+//   - 测向算法基类 ArithmeticDoa (相关干涉仪 / 幅相法 / 虚拟阵列)
+//   - 公共工具命名空间 PublicSpace (日志 / 峰值检测 / 角度规整 / 文件读取)
 //   - 主类 SpoofingDoa 与接口类 GN902
 // =============================================================================
 
@@ -74,17 +74,54 @@ namespace PublicSpace
      */
     extern int m_save_data_Flg;
 
+    // ==================== 数据操作 ====================
+    void findPeaks(const std::vector<double> data, vector<int> &index2, vector<double> &vaules2); // 获取峰值
+    void split(vector<string> &result, string str, char str1); // 字符串分割
+    void trim(string &str); // 去掉字符串中的空格
+    int readFile(const string adr, vector<string> &data); // 读取文件
+
     // ==================== 数学工具 ====================
-    int Round360(int x); // 将整数角度规整到[0,360)范围
+    double getNorm(vector<complex<double>> data); // 计算复数的L2范式
+    double linearInterpolation(double x1, double y1, double x2, double y2, double x); // 线性插值
+    double Round3600(double x); // 将角度规整到[0,360)度范围
+    int Round360(int x);
 
     // ==================== 配置文件与时间 ====================
+    int readConfigtxt(const string adr, map<string, string> &configMap); // 读取配置文件
     string getNowTime(); // 获取当前时间
 
     // ==================== 日志系统 ====================
+    void getLogCont(int id); // 设置日志编号ID
     void LogCreat(const string path); // 创建日志文件
-    void Log(const char *format, ...); // 编写日志（支持可变参数格式化）
+    // void Log(const char *format, ...); // 编写日志（支持可变参数格式化）
+    void LogClose(void); // 关闭日志文件
 
     // ==================== 模板函数 ====================
+
+    /**
+     * @brief 将二维vector序列化为 "{{...},{...},{...}}" 格式的字符串
+     */
+    template <typename vec>
+    std::string Vector2String(const std::vector<std::vector<vec>> &vectorData)
+    {
+        std::ostringstream oss;
+        oss << "{";
+        for (size_t i = 0; i < vectorData.size(); ++i)
+        {
+            oss << "{";
+            for (size_t j = 0; j < vectorData[i].size(); ++j)
+            {
+                if (j > 0)
+                {
+                    oss << ",";
+                }
+                oss << vectorData[i][j];
+            }
+            oss << "}";
+        }
+        oss << "}";
+        return oss.str();
+    }
 
     /**
      * @brief 将数组数据以二进制格式追加写入文件
@@ -116,6 +153,69 @@ namespace PublicSpace
         }
     }
 
+    /**
+     * @brief 将二维vector调整为指定大小（先清空再resize）
+     */
+    template <typename V>
+    void vectorResize(std::vector<std::vector<V>>& data, int cols, int rows)
+    {
+        vector<std::vector<V>>().swap(data);
+        data.resize(cols);
+        for (int i = 0; i < cols; i++)
+        {
+            data[i].resize(rows);
+        }
+    }
+
+    // 从配置map中读取数据
+    template<typename Value>
+    int getMapData(const map<string, string>& configMap, const string key, Value& values) {
+        auto it = configMap.find(key);
+        if (it == configMap.end()) {
+            return -1;
+        }
+
+        std::istringstream iss(it->second);
+        if (!(iss >> values) || !iss.eof())
+        {
+            return -2;
+        }
+        return 0;
+    }
+
+    // 字符串转换为二维数组，将{{}， {}， {} }保存的切刀字符串数组转换为二维vector数组
+    template<typename vec>
+    void string2Vector(const string str, vector<vector<vec>>& result) {
+        result.clear();
+        vector<vec> tp_reult;
+        vector<string> tp1;
+        split(tp1, str, '}');
+        vector<string> tp2;
+        vector<string> tp3;
+        for (int i = 0; i < (int)tp1.size(); i++)
+        {
+            tp2.clear();
+            tp_reult.clear();
+            split(tp2, tp1[i], '{');
+            for (int j = 0; j < (int)tp2.size(); j++)
+            {
+                tp3.clear();
+                split(tp3, tp2[j], ',');
+                for (int k = 0; k < (int)tp3.size(); k++)
+                {
+                    std::istringstream iss(tp3[k]);
+                    vec tp4;
+                    if (!(iss >> tp4) || !iss.eof())
+                    {
+                        return;
+                    }
+                    tp_reult.emplace_back(tp4);
+                }
+            }
+            result.emplace_back(tp_reult);
+        }
+    }
+
 }
 
 using namespace PublicSpace;
@@ -140,11 +240,22 @@ struct InterferInfo // 用于测向的相关信息
     double i_Amp[200];        ///< 实测幅度数组（线性值）
 };
 
+/**
+ * @struct Rs
+ * @brief 频率-阵列半径对应关系
+ */
+struct Rs
+{
+    double i_starF; ///< 起始频率（Hz）
+    double i_endF;  ///< 结束频率（Hz）
+    double i_r;     ///< 该频率区间对应的阵列半径（米）
+};
+
 #pragma pack()
 
 /**
  * @class ArithmeticDoa
- * @brief 测向算法核心类，封装相关干涉仪测向方法(理论模板、相关匹配、质量评估)
+ * @brief 测向算法核心类，封装相关干涉仪、幅相法、虚拟阵列扩展等测向方法
  */
 class ArithmeticDoa
 {
@@ -158,8 +269,30 @@ protected:
     void calPseudoByInterfer(const vector<vector<double>> phaseTheory, const InterferInfo data, vector<double> &diff);
     void calInterfer(const vector<vector<double>> phaseTheory, const InterferInfo data, double &angle, double &quality, vector<double> &diff2);
 
-    /*==================天线对/基线扩展==================*/
+    /*==================幅相法测向==================*/
+    int getSimulatePhase(const string path, const double f, std::vector<std::vector<double>> &phase);
+    int getSimulateAmp(const string path, const double f, std::vector<std::vector<double>> &amp);
+    void calAmpPhaseSimulateA(const string path, const double f, vector<vector<complex<double>>>& simulateA);
+    void calAmpPhase(vector<vector<complex<double>>> simulateA, const InterferInfo data, double &angle, double &quality, vector<double> &diff);
+    void calAmpPhase(const vector<vector<complex<double>>> simulateA, const vector<complex<double>> actualA, double& angle, double& quality, vector<double>& diff);
+    void getA(const vector<double> amp, const vector<double> phase, vector<complex<double>> &A);
+    int getModeData(const string path, vector<vector<double>> &data);
+    void calPseudoByAmpPhase(const vector<vector<complex<double>>> simulateA, vector<complex<double>> theory_A, vector<double> &diff);
+    bool existAmpPhsFile(const string path, const double f);
+
+    /*==================虚拟阵列扩展（Virtual Array）==================*/
+    void getVirtual(const double virMultiple, vector<vector<int>> &antnna, vector<double> &phase_diff);
+    void getVirtualTheory(const int antnnaNum, const std::vector<std::vector<double>> tp_theory, const double virMultiple, std::vector<std::vector<double>> &virtualTheory);
+    int getVirtualAntNum(const int ant1, const int ant2);
+    void calSecondDoaByVirInterf(const vector<vector<double>> phaseTheory, const double virMultiple, vector<double> diff, InterferInfo data, double &angle, double &quality);
+
+    /*==================天线选择与相位处理工具方法==================*/
+    void calAngleSerchRange(const vector<int> index, const vector<vector<int>> cutSequence, const int AntennaNum, int max_index, int &startAngle, int &endAngle);
     void setUseAntennaAndPhaseAll(vector<vector<int>> &cutSequence, vector<double> &phaseDiff);
+    int getAntennaPhase(const vector<int> use_ant, const int antennNUm, vector<vector<int>> &cutSequence, vector<double> &phaseDiff);
+    void getUsePhaseDiffAll(const vector<int> use_cut, vector<vector<int>> &cutSequence, vector<double> &phaseDiff);
+    void getUseAntennaByADirect(const vector<double> A, const int use_cut_num, vector<int> &use_cut, int &startAngle, int &endAngle);
+    int getRData(const string adr, vector<Rs> &mR);
 
     /*==================测向质量评估==================*/
     double getDoaMass(const vector<double> diffTheory, const vector<double> diff, int starAngle, int endAngle);
@@ -181,6 +314,8 @@ struct SatelliteData
     double i_Phase; // 载波相位（周）
     double i_Dop;   // 多普勒频移（Hz）
     // 添加司南欺骗标识：0=正常，1=欺骗
+    // 标识为1，对应系统频点为欺骗信号
+    // 当前这一帧数据，取卫星号的并集
     int i_SpoofingFlag; // 0=正常，1=欺骗
 };
 
@@ -255,6 +390,16 @@ struct SatelliteDataPhaseDiffB
     double i_phase_diff[100] = {0.0};        // 载波相位差(单位:周)，与切刀序号一一对应
 };
 
+// 由外部欺骗检测算法传入的单个欺骗检测结果
+struct SingleDeceptiveResult
+{
+    int r_Sys;     // 欺骗的系统
+    int r_Type;    // 欺骗的频点
+    int r_Angel;   // 欺骗的角度(单位:度)
+    int prncount;  // 此频点欺骗卫星数量
+    int r_Prn[30]; // 欺骗的卫星号列表(最多30颗)
+};
+
 #pragma pack()
 
 // =============================================================================
@@ -267,56 +412,16 @@ public:
     SpoofingDoa(void);
     ~SpoofingDoa(void);
 
-    /**
-     * @brief 初始化引擎: 建立频率表、理论相位差模板、检测历史记录等全部运行状态
-     * @note 构造后即可按项目默认值运行(不读配置文件), 运行参数已内置在 Init 中
-     */
-    void Init(void);
+    void Init(void); // 初始化: 读取配置、初始化频率表、理论相位差、检测历史记录等
 
-    /**
-     * @brief 设置某系统频点的欺骗检测阈值
-     * @param sys         卫星系统编码(0=GPS,1=GLONASS,2=SBAS,3=Galileo,4=BDS,5=QZSS)
-     * @param type        频点编码
-     * @param threshold   卫星数阈值(相位差聚成一簇的最小卫星数), -1 表示不修改
-     * @param phsThreshold 相位差检测阈值(度), <=0 表示不修改
-     * @note 当 sys==-1 且 type==-1 时, 用给定 threshold/phsThreshold 初始化全部频点
-     */
     void setThresholdDetectionDoa(int sys, int type, int threshold, double phsThreshold);
-
-    /**
-     * @brief 喂入一批 GNSS 原始数据并触发检测/测向
-     * @param data    GNSS 数据数组(按切刀序列排列)
-     * @param dataLen 数据条数(切刀数量)
-     */
+    void setTypeDetectionBySnr(int thresholdNum, int sys, int type);
     void setGNSSData(const GNSSData *data, int dataLen);
-
-    /**
-     * @brief 取出最近一轮的测向/报警结果
-     * @param result 输出结果(含各频点报警角度、卫星明细)
-     * @return 0=成功
-     */
     int getAngleSpoofingDoa(SpoofingResult &result);
-
-    /**
-     * @brief 设置切刀(天线对)序列
-     * @param len   数组长度(须为偶数, 每 2 个整数组成一对 {通道1天线, 通道2天线})
-     * @param cutSq 天线对序列, 两值相等表示校正刀(不参与测向)
-     */
+    void setConfigTxtAdr(const char *adr);
     void setCutSquence(int len, const int *cutSq);
-
-    /**
-     * @brief 设置连续报警确认次数
-     * @param num 次数(1~10), 超出范围按 1 处理
-     */
+    void setSpoofingDetecteResult(const vector<SingleDeceptiveResult> detectResult);
     void setDetectionRecordNum(int num);
-
-    /**
-     * @brief 配置循环切刀运行方式
-     * @param cyclic      是否启用循环切刀检测
-     * @param oneCutFrams 每个切刀帧数(>0 才生效, 0=沿用旧值)
-     * @param smooth      是否多帧平滑(true=平滑, false=取末帧)
-     * @param omniR       全向天线阵列半径(米, >0 且为全向天线时重建理论模板)
-     */
     void configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR);
 
 private:
@@ -327,9 +432,12 @@ private:
     void getSatelliteDataByType(const std::vector<SatelliteDataPhaseDiffA> &dataA, std::map<int, std::vector<SatelliteDataPhaseDiffA>> &dataT);
 
     // ---- InitData.cpp: 初始化模块 ----
+    void initProject(void);
     int TypeInt(int sys, int type);
     void initType(void);
     void initDetectionThreshold(int threshold, double phsThreshold);
+    void paraProjectGN902();
+    void paraProjectGN930();
 
     // ---- Corrected.cpp: 校正数据处理 ----
     void setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>> dataA);
@@ -337,31 +445,56 @@ private:
     void getCorrectedGnssData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     void calCorrecteData(SatelliteDataPhaseDiffA &dataA);
 
+    // ---- Directed.cpp: 定向天线测向 ----
+    void getUseAntennaBySnr(SatelliteDataPhaseDiffB &dataB, int &startAngle, int &endAngle);
+    void setInterferInfoDataDirect(const std::vector<SatelliteDataPhaseDiffB> &dataB, std::map<int, std::map<int, InterferInfo>> &inferInfoData);
+
     // ---- Omni.cpp: 全向天线测向 ----
     void setInterferInfoDataOmni(const std::vector<SatelliteDataPhaseDiffB> &dataB, std::map<int, std::map<int, InterferInfo>> &inferInfoData);
+
+    // ---- AmpPhase.cpp: 幅相法测向 ----
+    void getResultAmpPhaseDoa(vector<SatelliteDataPhaseDiffB> dataB);
+    void initSimulateA(void);
 
     // ---- Interfer.cpp: 相关干涉仪测向 ----
     void getResultInterferDoa(vector<SatelliteDataPhaseDiffB> dataB);
     void initTheory(void);
+    void initTheoryBySimulatePhase(void);
 
     // ---- Alarm.cpp: 欺骗检测与告警 ----
     void calAlarmByPhaseDiff(int typeInt, const std::vector<SatelliteDataPhaseDiffA> &dataA, std::vector<SatelliteDataPhaseDiffA> &alarmSatelliteData, int &alarm);
+    void setCorrectDetectionDataAlarm(const GNSSData *data, int dataLen);
+
+    // ---- SpectrumDesity.cpp: 伪谱积分 ----
+    void setSpoofingResultPseudoSpectrumDesity(SpoofingResult &result);
+    void getPseudoSpectrumDesity(vector<vector<double>> diff, double &angle);
+    void getPseudoSpectrumType(const vector<vector<double>> diff, vector<double> &meanDiff, int alarm);
 
     // ---- 综合调度与辅助函数 ----
     void setDataAngle(const GNSSData *data, int dataLen);
-    void setR(void);
+    void setDataAlarm(const GNSSData data);
+    void getAlarm(const std::map<int, std::vector<SatelliteDataPhaseDiffA>> &dataT);
+    void setR(const string adr);
     void calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, InterferInfo &info, int &doaFlg);
     void getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     void calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA);
     void getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     void setSpoofingResult(SpoofingResult &result);
     void calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoData);
+    void getSpoofingDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA);
+    void setSpoofingDetectionData(std::vector<SatelliteDataPhaseDiffA> &spoofingData);
+    void getDataByDetectionResult(const GNSSData data, GNSSData &detetectData);
     void saveGNSSData(const GNSSData *data, int dataLen);
+    void getSpoofingResultByDetection(SpoofingResult &result);
+    int getDetection180(int typeInt, int prn, InterferInfo &info);
+    void setPermutationOptimiz180(SatelliteDataPhaseDiffB dataB, const vector<vector<double>> phaseTheory, double &angle, double &qulity);
+    void getOptimizResultDoa180(vector<SatelliteDataPhaseDiffB> dataB);
 
     // ---- 角度工具（静态，对应 Python detection_lib 的角度函数）----
     static double normalizeAngle180(double deg);
     static double circularMeanDeg(const std::vector<double> &degs);
     static double circularSpanDeg(const std::vector<double> &degs);
+    static double foldHalfCycle(double deg);
     static double circularSpan180Deg(const std::vector<double> &degs);
 
     // ---- 循环切刀检测流程（对应 Python detection_main.py / detection_lib.py）----
@@ -380,133 +513,109 @@ private:
     void LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<SatelliteDataPhaseDiffA>> dataT);
 
 private:
-    // ---- 频率与阵列参数 ----
-    std::map<int, double> m_F;                        ///< 各频点载波频率(Hz), key=TypeInt(sys,type)=sys*100+type
-    std::map<int, int> m_Detection_Threshold;         ///< 各频点欺骗检测卫星数阈值(相位差聚簇的最小卫星数)
-    std::map<int, double> m_Detection_PhsThreshold;   ///< 各频点相位差检测阈值(单位:周)
-    std::map<int, double> m_R;                        ///< 各频点阵列半径(米)
+    enum ProjectNum
+    {
+        GN902,   // GN902设备: 全向天线，7阵元
+        GN930U,  // GN930U设备: 全向天线，7阵元
+        GN930,   // GN930设备: 全向天线，7阵元，双板卡
+        GN560    // GN560设备: 定向天线，7阵元
+    };
 
-    // ---- 检测模板数据 ----
-    std::map<int, std::vector<std::vector<double>>> m_Theory;   ///< 各频点理论相位差模板 [360角度][阵元]
+    // ---- 频率与阵列参数 ----
+    std::map<int, double> m_F;
+    std::map<int, int> m_Detection_Threshold;
+    std::map<int, double> m_Detection_PhsThreshold;
+    std::map<int, int> m_Detection_snrThrehold;
+    std::map<int, double> m_R;
+
+    // ---- 检测记录与模板数据 ----
+    std::map<int, std::vector<std::vector<double>>> m_Theory;
+    std::map<int, std::vector<std::vector<complex<double>>>> m_SimulateA;
 
     // ---- 校正与处理结果 ----
-    std::map<int, std::map<int, SatelliteDataPhaseDiffA>> m_CorrectionData;   ///< 通道校正相位差(按频点/PRN)
-    std::map<int, std::vector<AlarmData>> m_AngleResultData;                  ///< 测向结果: 各频点报警卫星列表
-    std::map<int, std::map<int, double>> m_Max_Snr;                           ///< 各频点各星最大信噪比
+    std::map<int, std::map<int, SatelliteDataPhaseDiffA>> m_CorrectionData;
+    std::map<int, std::map<int, std::vector<double>>> m_Pseudo_Spectrum_Value;
+    std::map<int, std::vector<AlarmData>> m_AngleResultData;
+    std::map<int, std::map<int, double>> m_Max_Snr;
+
+    // ---- 外部交互 ----
+    vector<SingleDeceptiveResult> m_detectResult;
+    vector<double> m_Angle_Accumulate;
+    std::map<int, std::map<int, InterferInfo>> m_infoData180;
 
     // =========================================================================
     // 循环切刀欺骗检测状态（对应 Python detection_lib.py）
     // =========================================================================
-    static const double CNR_MIN_DB;              ///< 参与检测的最小载噪比(dB-Hz)
-    static const double STABILITY_RANGE_DEG;     ///< 相位差稳定范围阈值(度)
-    static const int MIN_STABLE_SAMPLES;         ///< 判定稳定所需最小样本数
+    static const double CNR_MIN_DB;
+    static const double STABILITY_RANGE_DEG;
+    static const int MIN_STABLE_SAMPLES;
 
-    std::map<int, int> m_ConsecutiveAlarm;       ///< 各频点连续报警计数
+    std::map<int, int> m_ConsecutiveAlarm;
 
     struct TrackingInfo
     {
-        std::set<int> cluster_sats;   ///< 被跟踪的欺骗卫星簇(PRN集合)
-        double doa_deg = -1.0;        ///< 当前跟踪的测向角度(度, -1=未确定)
-        double quality = -1.0;        ///< 当前跟踪的测向质量(0-100, -1=未确定)
+        std::set<int> cluster_sats;
+        double doa_deg = -1.0;
+        double quality = -1.0;
     };
-    std::map<int, TrackingInfo> m_Tracking;      ///< 各频点欺骗跟踪状态
+    std::map<int, TrackingInfo> m_Tracking;
 
-    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;  ///< 跨周期累计的基线相位差(补缺刀用)
+    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;
 
 protected:
     // =========================================================================
-    // 配置与控制参数 (Configure / control parameters)
-    //
-    // 说明: 以下参数控制欺骗检测与测向引擎的行为。多数在 Init() 中会被默认值覆盖,
-    //       也可通过公开接口(如 configCyclicRuntime / setThresholdDetectionDoa)
-    //       在运行时调整。取值 0/1 的参数均为开关(0=关闭, 1=开启)。
+    // 配置与控制参数
     // =========================================================================
-
-    /// 连续报警确认次数(对应 Python 的 ALARM_CONSECUTIVE_P)。
     int m_Detection_Recodds_Num = 1;
-
-    /// 阵列阵元数量(7)。
+    int m_Project_flg = GN930U;
     int m_AntennaNum = 7;
-
-    /// 默认相位差检测阈值(度), 用于 initDetectionThreshold 初始化各频点阈值。
+    double m_Angle_Threshold = 3;
     double m_Phasediff_Threshold = 5;
-
-    /// 每个切刀位置的帧数: >1 时启用多帧平滑或取末帧处理(由 m_Smooth_Flag 决定方式)。
+    int m_antnenaType = 0;
     int m_OneCut_Frams = 1;
-
-    /// 平滑标志: 1=对同一切刀多帧相位差做圆周均值平滑; 0=直接取末帧。
     int m_Smooth_Flag = 0;
-
-    /// 默认欺骗检测卫星数阈值(相位差聚簇的最小卫星数)。
+    int m_Doa_Cut_Num = 7;
     int m_Detection_Threshold_Num = 2;
-
-    /// 循环切刀检测开关: 1=启用跨轮循环切刀检测与跟踪(主流程)。
+    int m_PseudoSpectrum_Flag = 0;
+    int m_Doa_Detection_Flag = 0;
     int m_Cyclic_Detection_Flag = 0;
-
-    /// 是否打印原始 GNSSData 日志: 0=否, 1=是。
     int m_Save_Original_Flg = 0;
-
-    /// 参与测向/检测的最小载噪比阈值(dB-Hz): 低于该值的天线对/卫星被剔除。
+    int m_Save_Oringial_Num = 0;
     double m_Snr_Threshold = 0.0;
-
-    /// 测向质量阈值(0-100): 质量低于该值的测向结果被丢弃(不参与报警)。
     double m_Qulity_Threshold = 0.0;
-
-    /// 测向所需的最小有效切刀数: 有效切刀数低于该值则本轮不测向。
+    int m_Doa_Arithmetic = 1;
     int m_Doa_Cut_min_Num = 6;
-
-    /// 日志文件路径前缀(完整路径 = 前缀 + 序号 + ".log")。
     string m_LogFile = "./spoofingDoaLog_";
-
-    /// 是否剔除信噪比不全(某切刀 SNR 缺失)的卫星: 1=剔除, 0=保留。
+    double m_Accumulate_multiplier = 0;
+    string m_Simulate_Data_file = "/simulateData/";
     int m_Delete_Prn_Flag = 1;
-
-    /// 全向天线阵列半径(米): 直接决定理论相位差模板。
+    int m_Secondary_Doa_Flag = 0;
+    int m_Virtual_Flag = 0;
+    double m_Detection180_Qulity_Threshold = 10.0;
+    double m_Virtual_Multiple = 0.94;
+    int m_Screen_detection_Flag = 0;
+    int m_getUseAntennaBySnr_Flag = 0;
+    int m_Receiver_num = 1;
+    string m_Radr;
     double m_omni_R = 0.1865;
-
-    /// 切刀(天线对)序列: 每项 {通道1天线, 通道2天线}; 两值相等表示校正刀(不参与测向)。
-    /// 顺序对齐 Python CODE_TO_PAIR: 校正 {1,1} + 六测向刀 {1,2}..{1,7}。
-    vector<vector<int>> m_cutSequence = {{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}};
+    int m_Detection_Tag = 0;
+    vector<double> m_All_Simulate_data_Fre = {1176e6, 1279e6, 1561e6, 1602e6};
+    vector<vector<int>> m_cutSequence = {{7, 7}, {1, 2}, {1, 3}, {1, 4}, {7, 7}, {1, 5}, {1, 6}, {1, 7}};
 };
 
 
 // =============================================================================
 // GN902 接口类（保持与 interface.h / interface.cpp 调用的签名一致）
-// 对外 C 接口 Create_GN902 / SetThresholdDetection_GN902 / SetData_GN902 /
-// GetResult_GN902 / Release_GN902 最终都落到本类方法上。
 // =============================================================================
 class GN902
 {
 public:
-    GN902();   ///< 构造: 创建引擎并初始化循环切刀运行参数
-    ~GN902();  ///< 析构: 释放引擎
-
-    /**
-     * @brief 设置欺骗检测阈值
-     * @param phsDiffThreshold       位相差检测阈值(度)
-     * @param satelliteCountThreshold 卫星数阈值(相位差聚簇的最小卫星数)
-     * @param cutCountThreshold       连续确认刀数(>0 时生效, 对应连续报警确认次数)
-     * @param sysEnum                 卫星系统编码
-     * @param typeEnum                频点编码
-     */
+    GN902();
+    ~GN902();
     void SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, double cutCountThreshold, int sysEnum, int typeEnum);
-
-    /**
-     * @brief 流式喂入一帧数据
-     * @param data     本帧 GNSS 数据
-     * @param cutIdx_1 通道1天线索引(参考天线, 固定为 1)
-     * @param cutIdx_2 通道2天线索引(1=校正刀, 2..7=六测向刀)
-     * @note 校正刀再次出现时自动判定上一轮结束并触发检测+测向
-     */
     void SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2);
-
-    /**
-     * @brief 取最近一轮测向结果
-     * @param result 输出结果
-     */
     void GetResult(SpoofingResult& result);
-
 private:
-    void Detect();  ///< 整轮组批并喂入引擎, 完成循环切刀欺骗检测与跟踪
-    void Doa();     ///< 从引擎取出本轮测向结果
+    void Detect();
+    void Doa();
 };
