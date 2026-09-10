@@ -555,7 +555,11 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
         vector<SatelliteDataPhaseDiffA> tp;
         tp.clear();
         vector<SatelliteDataPhaseDiffA>().swap(tp);
-        getSatelliteDataPhaseDiffA(data[i], tp);
+        // 校正刀(自校准 {1,1})不按载噪比过滤: 与 Python compute_calibration 一致,
+        // 用全部匹配卫星(含低载噪比)计算通道校正偏移; 否则低载噪比卫星被剔除会使
+        // 校正偏移整体漂移(可达上百度), 导致测向角度错位。测向刀仍按载噪比过滤。
+        bool isCalCut = (i < (int)m_cutSequence.size() && m_cutSequence[i][0] == m_cutSequence[i][1]);
+        getSatelliteDataPhaseDiffA(data[i], tp, !isCalCut);
         dataA.emplace_back(tp);
         LogGNSSData(data[i], i + 1);
     }
@@ -1045,9 +1049,12 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
         for (auto &sat : dataA[j])
         {
             int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
-            auto it = m_Tracking.find(typeInt);
-            if (it != m_Tracking.end() &&
-                it->second.cluster_sats.find(sat.i_Prn) != it->second.cluster_sats.end())
+            // 与 Python 对齐: 基线累积针对"已跟踪频点"的全部稳定卫星(而非仅 cluster_sats)。
+            // Python 在 build_vectors_and_detect 之后对 (current_alarms ∪ tracking) 频点的
+            // 全部稳定卫星累积 baselines[code]; 若此处仍限定 cluster_sats, 会在卫星尚未
+            // 聚入簇时漏掉其跨周期相位差, 导致部分卫星(如 14/24/42)测向基线不全或口径错位。
+            // 测向候选星仍由 getCrossCycleDataB 限定为 cluster_sats, 不影响检测结果。
+            if (m_Tracking.find(typeInt) != m_Tracking.end())
             {
                 filtered.emplace_back(sat);
             }
@@ -1218,7 +1225,7 @@ void SpoofingDoa::setDetectionRecordNum(int num)
  * @param dataA 输出: 各卫星的相位差、信噪比(按 PRN/系统/频点对齐)
  * @note 取两通道同名卫星的载波相位差(取小数部分, 归一化到 [0,1) 周)
  */
-void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA)
+void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA, bool snrFilter)
 {
     dataA.clear();
     int size1 = data.i_PortOneNum;
@@ -1266,7 +1273,7 @@ void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<Satell
             {
                 flg_E = false;
 
-                if (data.i_PortOne[i].i_Snr >= m_Snr_Threshold && data.i_PortTwo[j].i_Snr >= m_Snr_Threshold)
+                if (!snrFilter || (data.i_PortOne[i].i_Snr >= m_Snr_Threshold && data.i_PortTwo[j].i_Snr >= m_Snr_Threshold))
                 {
                     data2_index.erase(std::remove(data2_index.begin(), data2_index.end(), j), data2_index.end());
 
