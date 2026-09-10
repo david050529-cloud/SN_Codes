@@ -272,8 +272,6 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
     vector<double>().swap(diff);
     diff.resize(360);
     int tp_ang = 0;
-    InterferInfo tp_data = data;
-    double tp_Phase_theory[200];
     for (int ang = startAngle; ang < endAngle + 1; ang++)
     {
         double sumDiff = 0.0;
@@ -283,30 +281,32 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
             int antn1 = data.i_AntennaSq[i][0];
             int antn2 = data.i_AntennaSq[i][1];
             double theoryPhase = phaseTheory[tp_ang][antn1 - 1] - phaseTheory[tp_ang][antn2 - 1];
-            tp_Phase_theory[i] = theoryPhase;
-
             sumDiff = sumDiff + cos(theoryPhase - data.i_Phase_Diff[i]);
         }
         if (sumDiff > max_val)
         {
             max_val = sumDiff;
             ang_val = tp_ang;
-            for (int j = 0; j < data.i_Phase_Len; j++)
-            {
-                tp_data.i_Phase_Diff[j] = tp_Phase_theory[j];
-            }
         }
         diff[tp_ang] = sumDiff;
         diff2[tp_ang] = (sumDiff / size + 1) / 2;
     }
 
     angle = Round360(ang_val);
-    vector<double> tp_theory_diff;
-    calPseudoByInterfer(phaseTheory, tp_data, tp_theory_diff);
-    quality = getDoaMass(tp_theory_diff, diff, startAngle, endAngle);
-    for (int i = 0; i < 359; i++)
+    // 与 Python correlative_doa 对齐: quality = (corr + 1)/2 * 100,
+    // 其中 corr = max(sum cos)/size。原 getDoaMass 采用伪谱归一化相关口径,
+    // 与 Python 的 (best_corr+1)/2*100 不一致, 导致质量分与角度置信度不符。
+    if (size > 0)
     {
-        diff2[i] *= quality;
+        quality = (max_val / size + 1.0) / 2.0 * 100.0;
+    }
+    else
+    {
+        quality = 0.0;
+    }
+    for (int i = 0; i < 360; i++)
+    {
+        diff2[i] = (diff[i] / size + 1.0) / 2.0 * 100.0;
     }
 }
 
@@ -595,7 +595,14 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
 
     vector<SatelliteDataPhaseDiffB> dataB;
     dataB.clear();
+    // 测向数据放宽口径: 不要求卫星在全部 7 刀(含校正刀)都出现, 只要求 6 条测向
+    // 基线齐全(由 calAngleUseAntenna 的 m_Doa_Cut_min_Num 把关), 与 Python
+    // run_doa_one 只要求 6 个测向 code(9/57/17/25/33/1) 一致。否则缺失校正刀
+    // 的卫星会被整体丢弃, 导致报警频点/卫星数偏少(如 B2b 整点缺失)。
+    int savedDeletePrnFlag = m_Delete_Prn_Flag;
+    m_Delete_Prn_Flag = 0;
     getSatelliteDataPhaseDiffB(dataA, dataB);
+    m_Delete_Prn_Flag = savedDeletePrnFlag;
     LogSatelliteDataPhaseDiffB(dataB);
 
     vector<SatelliteDataPhaseDiffB> doaDataB;
@@ -734,8 +741,6 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
     doaFlg = 1;
     int diffLen = dataB.i_diffLen;
     int count = 0;
-    map<int, map<int, double>> tp_antenna_map;
-    map<int, double> tp1;
     float maxSnr = 99;
 
     vector<vector<int>> tp_antnna;
@@ -762,8 +767,6 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
         }
         tp_antnna.emplace_back(m_cutSequence[j]);
         tp_diff.emplace_back(dataB.i_phase_diff[j]);
-        tp1[m_cutSequence[j][1]] = dataB.i_phase_diff[j];
-        tp_antenna_map[m_cutSequence[j][0]] = tp1;
         ++count;
     }
     if (count < m_Doa_Cut_min_Num)
@@ -771,13 +774,10 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
         doaFlg = 0;
         return;
     }
-    ArithmeticDoa::setUseAntennaAndPhaseAll(tp_antnna, tp_diff);
+    // 与 Python correlative_doa 对齐: 仅使用 6 条测向基线(参考天线1 到 天线2..7)，
+    // 不做 setUseAntennaAndPhaseAll 天线对传递扩展。扩展会引入半周歧义(180° 翻转)，
+    // 使同一卫星在不同测向轮之间角度来回跳变(如 352°↔172°)。
     int size = (int)tp_diff.size();
-    if (size < m_Doa_Cut_min_Num)
-    {
-        doaFlg = 0;
-        return;
-    }
     int prn = dataB.i_Prn;
     int typeInt = TypeInt(dataB.i_Sys, dataB.i_Type);
     if (diffLen > 1)
