@@ -86,15 +86,6 @@ namespace PublicSpace
         return std::sqrt(sum_of_squares);
     }
 
-    double linearInterpolation(double x1, double y1, double x2, double y2, double x)
-    {
-        if (fabs(x1 - x2) < 1e-10)
-        {
-            throw std::invalid_argument("x1 and x2 cannot be the same.");
-        }
-        return y1 + (x - x1) * ((y2 - y1) / (x2 - x1));
-    }
-
     void split(vector<string> &result, string str, char str1)
     {
         stringstream ss(str);
@@ -164,29 +155,6 @@ namespace PublicSpace
         return x;
     }
 
-    int readConfigtxt(const string adr, map<string, string> &configMap){
-        string path = adr;
-        ifstream configFile(path);
-        if (!configFile.is_open()){
-            cout << "**error:configtxt not have!!!" << path << endl;
-            return -1;
-        }
-
-        string line;
-        while (getline(configFile, line)){
-            istringstream iss(line);
-            string key, value;
-            if (getline(iss, key, '=') && getline(iss, value, '#'))
-            {
-                trim(key);
-                trim(value);
-                configMap[key] = value;
-            }
-        }
-        configFile.close();
-        return 0;
-    }
-
     string getNowTime() {
 
         if (m_logFlg != 0){
@@ -209,12 +177,6 @@ namespace PublicSpace
         else{
             return "";
         }
-    }
-
-    void getLogCont(int id){
-        m_LogCount = "";
-        m_LogCount.append(to_string(id));
-        return;
     }
 
     void LogCreat(const string path) {
@@ -266,18 +228,6 @@ namespace PublicSpace
             fflush(m_fp);
         }
 
-    }
-
-    void LogClose(void)
-    {
-        std::lock_guard<std::mutex> lock(m_fileMutex);
-
-        FILE *m_fp = m_Log_fp[m_LogCount];
-        if (NULL != m_fp)
-        {
-            fclose(m_fp);
-        }
-        m_Log_fp.erase(m_LogCount);
     }
 
 }
@@ -401,188 +351,6 @@ void ArithmeticDoa::calAngleSerchRange(const vector<int> index, const vector<vec
     if (startAngle > endAngle)
     {
         startAngle = startAngle - 360;
-    }
-}
-
-void ArithmeticDoa::getUseAntennaByADirect(const vector<double> A, const int use_cut_num, vector<int> &use_cut, int &startAngle, int &endAngle)
-{
-    if (use_cut_num < 2)
-    {
-        return;
-    }
-    int size = A.size();
-    vector<int> index;
-    index.clear();
-    index.resize(size);
-    for (int i = 0; i < size; i++)
-    {
-        index[i] = i;
-    }
-    std::sort(index.begin(), index.end(), [&](int i, int j)
-              { return A[i] > A[j]; });
-    int max_index = index[0];
-    int last_index = 0;
-    int next_index = 0;
-    vector<int> tp_index;
-    tp_index.emplace_back(max_index);
-    int size2 = 1;
-    int num = 0;
-    Log("cal use ant:\n");
-    while (size2 < use_cut_num + 1 && num < 20)
-    {
-        last_index = (tp_index[0] - 1 + size) % size;
-        next_index = (tp_index[size2 - 1] + 1) % size;
-        for (int i = 1; i < size; i++)
-        {
-            if (index[i] == last_index)
-            {
-                tp_index.insert(tp_index.begin() + 0, index[i]);
-                break;
-            }
-            if (index[i] == next_index)
-            {
-                tp_index.emplace_back(index[i]);
-                break;
-            }
-        }
-
-        size2 = tp_index.size();
-        num++;
-        for (int i = 0; i < size2; i++)
-        {
-            Log("%d,", tp_index[i]);
-        }
-        Log("\n");
-    }
-
-    int mid = (int)use_cut_num / 2;
-    int per = 360 / size;
-    if ((use_cut_num + 1) % 2 == 1)
-    {
-        startAngle = (tp_index[mid - 1]) * per;
-        endAngle = (tp_index[mid + 1]) * per;
-        endAngle = Round360(endAngle);
-    }
-    else
-    {
-        int first = tp_index[mid];
-        if (mid + 1 > use_cut_num)
-        {
-            mid = size2 - 2;
-        }
-        int sec = tp_index[mid + 1];
-        startAngle = first * per - per / 2;
-        endAngle = sec * per + per / 2;
-    }
-    if (startAngle > endAngle)
-    {
-        startAngle = startAngle - 360;
-    }
-    startAngle = startAngle + 10;
-    endAngle = endAngle - 10;
-    use_cut.resize(size2);
-    Log("direct ant use ant:{");
-    for (int i = 0; i < (int)tp_index.size(); i++)
-    {
-        use_cut[i] = tp_index[i] + 1;
-        Log("%d,  ", use_cut[i]);
-    }
-    Log("}");
-    Log("  startAngle=%d,endAngle=%d\n", startAngle, endAngle);
-}
-
-int ArithmeticDoa::getAntennaPhase(const vector<int> use_ant, const int antennNUm, vector<vector<int>> &cutSequence, vector<double> &phaseDiff)
-{
-    Log("use doa antenna:{");
-    for (size_t i = 0; i < use_ant.size(); i++)
-    {
-        Log("%d,", use_ant[i]);
-    }
-    Log("}\n");
-    int firstA = use_ant[0] - 1;
-    vector<double> tp_phs;
-    tp_phs.clear();
-    tp_phs.resize(antennNUm);
-    tp_phs[firstA] = 0;
-    bool flg = false;
-    int ant = 0;
-    double tp_diff = 0.0;
-    int tp_ant = 0;
-    for (size_t j = 1; j < use_ant.size(); j++)
-    {
-        tp_ant = use_ant[j];
-        flg = false;
-        for (size_t k = 0; k < j; k++)
-        {
-            ant = use_ant[k];
-            for (size_t i = 0; i < cutSequence.size(); i++)
-            {
-                if (tp_ant == cutSequence[i][0] && ant == cutSequence[i][1])
-                {
-                    flg = true;
-                    tp_diff = tp_phs[ant - 1] + phaseDiff[i];
-                    break;
-                }
-                if (tp_ant == cutSequence[i][1] && ant == cutSequence[i][0])
-                {
-                    flg = true;
-                    tp_diff = tp_phs[ant - 1] - phaseDiff[i];
-                    break;
-                }
-            }
-        }
-
-        if (flg)
-        {
-            tp_phs[tp_ant - 1] = tp_diff;
-        }
-        else
-        {
-            return -1;
-        }
-    }
-    phaseDiff.clear();
-    phaseDiff = tp_phs;
-    Log("per antenna phase:\n");
-    for (int i = 0; i < phaseDiff.size(); i++)
-    {
-        double tp2 = phaseDiff[i] * 180 / m_PI;
-        Log("---ant = %d,  phse=%.2f\n", i + 1, Round3600(tp2));
-    }
-    return 0;
-}
-
-void ArithmeticDoa::getUsePhaseDiffAll(const vector<int> use_cut, vector<vector<int>> &cutSequence, vector<double> &phaseDiff)
-{
-    vector<double> result_phs;
-    result_phs.clear();
-
-    int size = (int)use_cut.size();
-    int num = size * (size - 1) / 2;
-    vectorResize(cutSequence, num, 2);
-    result_phs.resize(num);
-    int num1 = 0;
-    int num2 = 0;
-    num = 0;
-    for (int i = 0; i < size - 1; i++)
-    {
-        num1 = use_cut[i];
-        for (int j = i + 1; j < size; j++)
-        {
-
-            num2 = use_cut[j];
-            cutSequence[num][0] = num1;
-            cutSequence[num][1] = num2;
-            result_phs[num] = phaseDiff[num1 - 1] - phaseDiff[num2 - 1];
-            num++;
-        }
-    }
-    phaseDiff.clear();
-    phaseDiff = result_phs;
-    for (int i = 0; i < phaseDiff.size(); i++)
-    {
-        double tp2 = phaseDiff[i] * 180 / m_PI;
-        Log("---ant = %d a1=%d,a2=%d, phse=%.2f\n", i + 1, cutSequence[i][0], cutSequence[i][1], Round3600(tp2));
     }
 }
 
@@ -982,51 +750,6 @@ void ArithmeticDoa::calAmpPhase(vector<vector<complex<double>>> simulateA, const
     quality = getDoaMass(tp_theory_diff, diff, 0, 360);
 }
 
-void ArithmeticDoa::calAmpPhase(const vector<vector<complex<double>>> simulateA, const vector<complex<double>> actualA, double& angle, double& quality, vector<double>& diff)
-{
-    int num = actualA.size();
-    double tp_ActualNorm = getNorm(actualA);
-    double tp_max = -999.0;
-    complex<double> tp_sumComplex(0.0, 0.0);
-    double tp_diff = 0.0;
-    diff.clear();
-    diff.resize(360);
-    vector<vector<complex<double>>> tp_simulateA;
-    tp_simulateA.resize(360);
-
-    vector<complex<double>> tp_A;
-    tp_A.clear();
-    tp_A.resize(num);
-    vector<complex<double>> tp_A2;
-    tp_A2.clear();
-    for (int ang = 0; ang < 360; ang++)
-    {
-        tp_sumComplex.imag(0.0);
-        tp_sumComplex.real(0.0);
-        tp_A = simulateA[ang];
-        tp_simulateA[ang] = simulateA[ang];
-
-        double tp_ANorm = getNorm(tp_A);
-        for (int i = 0; i < (int)tp_A.size(); i++)
-        {
-            tp_sumComplex = tp_sumComplex + conj(tp_A[i]) * actualA[i];
-        }
-        tp_diff = abs(tp_sumComplex) / (tp_ActualNorm * tp_ANorm);
-        if (tp_max < tp_diff)
-        {
-            tp_max = tp_diff;
-            angle = Round3600(-ang);
-            tp_A2.clear();
-            tp_A2 = tp_A;
-        }
-        diff[ang] = tp_diff * 100;
-
-    }
-    vector<double> tp_theory_diff;
-    calPseudoByAmpPhase(tp_simulateA, tp_A2, tp_theory_diff);
-    quality = getDoaMass(tp_theory_diff, diff, 0, 360);
-}
-
 bool ArithmeticDoa::existAmpPhsFile(const string path, const double f)
 {
         bool tp_f = true;
@@ -1318,7 +1041,6 @@ void SpoofingDoa::Init(void){
         m_Doa_Cut_min_Num = (int)m_cutSequence.size() - 1;
     }
 
-    m_Angle_Threshold = 3.0;
     m_Phasediff_Threshold = 5.0;
     m_Detection_Threshold_Num = 2;
     m_Snr_Threshold = 35.0;
@@ -1328,7 +1050,6 @@ void SpoofingDoa::Init(void){
     m_Doa_Detection_Flag = 0;
     m_Doa_Arithmetic = 1;
     m_PseudoSpectrum_Flag = 0;
-    m_Screen_detection_Flag = 0;
     m_Secondary_Doa_Flag = 0;
     m_Delete_Prn_Flag = 1;
     m_getUseAntennaBySnr_Flag = 0;
@@ -1351,11 +1072,6 @@ void SpoofingDoa::Init(void){
     setR(m_Radr);
 
     initDetectionThreshold(m_Detection_Threshold_Num, m_Phasediff_Threshold);
-
-    for (auto it = m_F.begin(); it != m_F.end(); ++it){
-        int intType = it->first;
-        m_Detection_snrThrehold[intType] = -1;
-    }
 
     if (1 == m_Doa_Arithmetic){
         initTheory();
@@ -1404,10 +1120,6 @@ void SpoofingDoa::setGNSSData(const GNSSData *data, int dataLen)
 int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
 {
     setSpoofingResult(result);
-    if (1 == m_Screen_detection_Flag && m_detectResult.size() > 0)
-    {
-        getSpoofingResultByDetection(result);
-    }
     if (0 == m_Detection_Tag)
     {
         PublicSpace::Log("Not SpectrumDesity result:\n");
@@ -2178,15 +1890,6 @@ void SpoofingDoa::setThresholdDetectionDoa(int sys, int type, int threshold, dou
     }
 }
 
-void SpoofingDoa::setTypeDetectionBySnr(int thresholdNum, int sys, int type)
-{
-    if (-1 != thresholdNum)
-    {
-        m_Detection_snrThrehold[TypeInt(sys, type)] = thresholdNum;
-    }
-    PublicSpace::Log("join detection by snr:Sys=%i,Type=%i\n", sys, type);
-}
-
 void SpoofingDoa::resetCyclicDetection(void)
 {
     m_ConsecutiveAlarm.clear();
@@ -2424,94 +2127,6 @@ void SpoofingDoa::setSpoofingDetectionData(std::vector<SatelliteDataPhaseDiffA> 
     vector<SatelliteDataPhaseDiffA>().swap(resultData);
 }
 
-void SpoofingDoa::setPermutationOptimiz180(SatelliteDataPhaseDiffB dataB, const vector<vector<double>> phaseTheory, double &angle, double &qulity)
-{
-
-    int length = dataB.i_diffLen - 1;
-    int combinations = std::pow(2, length);
-    qulity = -99.0;
-    SatelliteDataPhaseDiffB tpB;
-    for (int i = 0; i < combinations; ++i)
-    {
-        tpB = dataB;
-        for (int j = 1; j < length + 1; ++j)
-        {
-            double tp_phs_diff_original = dataB.i_phase_diff[j];
-            if (i & (1 << (j - 1)))
-            {
-                tpB.i_phase_diff[j] = tp_phs_diff_original + 0.5;
-            }
-            else
-            {
-                tpB.i_phase_diff[j] = tp_phs_diff_original;
-            }
-        }
-        PublicSpace::Log("optimiz:num=%d\n", i);
-        LogSatelliteDataPhaseDiffB(tpB);
-        vector<double> pseudoValue;
-        pseudoValue.clear();
-        int doaFlg = 1;
-        InterferInfo tp_info1;
-        tp_info1.i_Start = 0;
-        tp_info1.i_End = 359;
-        tp_info1.i_Phase_Len = 0;
-
-        double tp_angle1;
-        double tp_quality1;
-        calAngleUseAntenna(tpB, tp_info1, doaFlg);
-        ArithmeticDoa::calInterfer(phaseTheory, tp_info1, tp_angle1, tp_quality1, pseudoValue);
-        PublicSpace::Log("Angle=%.1f,Quality=%.1f\n", tp_angle1, tp_quality1);
-        if (tp_quality1 >= 99.9)
-        {
-            angle = tp_angle1;
-            qulity = tp_quality1;
-            return;
-        }
-        if (tp_quality1 > qulity)
-        {
-            angle = tp_angle1;
-            qulity = tp_quality1;
-        }
-    }
-}
-
-void SpoofingDoa::getOptimizResultDoa180(vector<SatelliteDataPhaseDiffB> dataB)
-{
-    int size = (int)dataB.size();
-    int typeInt = 0;
-    SatelliteDataPhaseDiffB tpB;
-    vector<vector<double>> phaseTheory;
-    AlarmData tp_alarm;
-    vector<AlarmData> tp_alarms;
-    for (int i = 0; i < size; i++)
-    {
-        tp_alarms.clear();
-        tpB = dataB[i];
-        typeInt = TypeInt(tpB.i_Sys, tpB.i_Type);
-        phaseTheory.clear();
-        phaseTheory = m_Theory[typeInt];
-        double angle;
-        double quality = 0.0;
-        setPermutationOptimiz180(tpB, phaseTheory, angle, quality);
-
-        tp_alarm.i_Prn = tpB.i_Prn;
-        tp_alarm.i_Angle = (int)angle;
-        tp_alarm.i_Quality = quality;
-
-        if (m_AngleResultData.find(typeInt) == m_AngleResultData.end())
-        {
-            tp_alarms.emplace_back(tp_alarm);
-            m_AngleResultData[typeInt] = tp_alarms;
-        }
-        else
-        {
-            tp_alarms = m_AngleResultData[typeInt];
-            tp_alarms.emplace_back(tp_alarm);
-            m_AngleResultData[typeInt] = tp_alarms;
-        }
-    }
-}
-
 void SpoofingDoa::setCutSquence(int len, const int *cutSq)
 {
     m_cutSequence.clear();
@@ -2531,167 +2146,6 @@ void SpoofingDoa::setCutSquence(int len, const int *cutSq)
         m_cutSequence[i][0] = cutSq[tp_index];
         m_cutSequence[i][1] = cutSq[tp_index + 1];
         PublicSpace::Log("set cutSequence:%d,m_cutSequence1 = %d,m_cutSequence2 = %d\n", i + 1, m_cutSequence[i][0], m_cutSequence[i][1]);
-    }
-}
-
-void SpoofingDoa::setSpoofingDetecteResult(const vector<SingleDeceptiveResult> detectResult)
-{
-    m_detectResult.clear();
-    vector<SingleDeceptiveResult>().swap(m_detectResult);
-    if (detectResult.size() > 0)
-    {
-        m_detectResult = detectResult;
-    }
-
-    if (0 != m_logFlg)
-    {
-        PublicSpace::Log("detecion Spoofing result by other arithmetic:\n");
-        for (int i = 0; i < detectResult.size(); i++)
-        {
-            PublicSpace::Log("Sys=%d,Type=%d,Prn={", detectResult[i].r_Sys, detectResult[i].r_Type);
-            for (int j = 0; j < detectResult[i].prncount; j++)
-            {
-                PublicSpace::Log("%d,", detectResult[i].r_Prn[j]);
-            }
-            PublicSpace::Log("}\n");
-        }
-    }
-}
-
-void SpoofingDoa::getDataByDetectionResult(const GNSSData data, GNSSData &resultData)
-{
-
-    GNSSData detetectData;
-    int detect_num = (int)m_detectResult.size();
-    int tp_result_num = 0;
-    detetectData.i_PortOneNum = 0;
-    detetectData.i_PortTwoNum = 0;
-    for (int i = 0; i < detect_num; i++)
-    {
-        for (int j = 0; j < data.i_PortOneNum; j++)
-        {
-            if (data.i_PortOne[j].i_Type == m_detectResult[i].r_Type && data.i_PortOne[j].i_Sys == m_detectResult[i].r_Sys)
-            {
-                tp_result_num = 0;
-                for (int k1 = 0; k1 < m_detectResult[i].prncount; k1++)
-                {
-                    if (data.i_PortOne[j].i_Prn == m_detectResult[i].r_Prn[k1])
-                    {
-                        tp_result_num = detetectData.i_PortOneNum;
-                        detetectData.i_PortOne[tp_result_num] = data.i_PortOne[j];
-
-                        detetectData.i_PortOneNum = tp_result_num + 1;
-                        break;
-                    }
-                }
-            }
-        }
-        for (int j = 0; j < data.i_PortTwoNum; j++)
-        {
-            tp_result_num = 0;
-            if (data.i_PortTwo[j].i_Type == m_detectResult[i].r_Type && data.i_PortTwo[j].i_Sys == m_detectResult[i].r_Sys)
-            {
-                for (int k1 = 0; k1 < m_detectResult[i].prncount; k1++)
-                {
-                    if (data.i_PortTwo[j].i_Prn == m_detectResult[i].r_Prn[k1])
-                    {
-                        tp_result_num = detetectData.i_PortTwoNum;
-                        detetectData.i_PortTwo[tp_result_num] = data.i_PortTwo[j];
-
-                        detetectData.i_PortTwoNum = tp_result_num + 1;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    resultData = detetectData;
-}
-
-void SpoofingDoa::getSpoofingResultByDetection(SpoofingResult &result)
-{
-    SpoofingResult tp_result = result;
-    int detect_num = (int)m_detectResult.size();
-    int count = result.i_Count;
-    SatelliteAngle tp_Satellite;
-    bool flg = false;
-    int typeInt = 0;
-    vector<AlarmData> tp_alarms;
-    SingleDeceptiveResult tp_decepResult;
-
-    AlarmData tp_result_alarm;
-
-    for (int i = 0; i < detect_num; i++)
-    {
-        tp_decepResult = m_detectResult[i];
-        int tp_sys = tp_decepResult.r_Sys;
-        int tp_type = tp_decepResult.r_Type;
-        flg = true;
-        for (int j = 0; j < count; j++)
-        {
-            tp_Satellite = tp_result.i_SatelliteAngle[j];
-            if (tp_Satellite.i_Sys == tp_sys && tp_Satellite.i_Type == tp_type)
-            {
-                flg = false;
-                break;
-            }
-        }
-        if (flg)
-        {
-            typeInt = TypeInt(tp_sys, tp_type);
-            if (m_AngleResultData.find(typeInt) != m_AngleResultData.end())
-            {
-                SatelliteAngle tp_result_SateA;
-                int SateASize = 0;
-                vector<double> angles(360, 0.0);
-                tp_alarms = m_AngleResultData[typeInt];
-                int PrnNum = (int)tp_alarms.size();
-                int detec_PrnNum = tp_decepResult.prncount;
-                for (int k1 = 0; k1 < detec_PrnNum; k1++)
-                {
-                    for (int k2 = 0; k2 < PrnNum; k2++)
-                    {
-                        if (tp_alarms[k2].i_Prn == tp_decepResult.r_Prn[k1])
-                        {
-                            tp_alarms[k2].i_Snr = m_Max_Snr[typeInt][tp_alarms[k2].i_Prn];
-                            tp_result_SateA.i_AlarmData[SateASize] = tp_alarms[k2];
-                            SateASize = SateASize + 1;
-                            int tp_angle = tp_alarms[k2].i_Angle;
-                            double tp_qulity = tp_alarms[k2].i_Quality / 100;
-                            for (int k3 = (0 - m_Angle_Threshold); k3 < m_Angle_Threshold; k3++)
-                            {
-                                int ang = tp_angle + k3;
-                                int ang2 = Round360(ang);
-                                angles[ang2] = angles[ang2] + (1 - fabs(k3) * 0.1) * tp_qulity;
-                            }
-
-                            break;
-                        }
-                    }
-                }
-                if (SateASize > 0)
-                {
-                    double maxAngl = -999.9;
-                    int tp_angle = -1;
-                    for (int k3 = 0; k3 < 360; k3++)
-                    {
-                        if (angles[k3] > maxAngl)
-                        {
-                            maxAngl = angles[k3];
-                            tp_angle = k3;
-                        }
-                    }
-                    int tp_count = result.i_Count;
-                    tp_result_SateA.i_Sys = tp_sys;
-                    tp_result_SateA.i_Type = tp_type;
-                    tp_result_SateA.i_Alarm = 0;
-                    tp_result_SateA.i_Count = SateASize;
-                    tp_result_SateA.i_Angle = tp_angle;
-                    result.i_Count = result.i_Count + 1;
-                    result.i_SatelliteAngle[tp_count] = tp_result_SateA;
-                }
-            }
-        }
     }
 }
 
@@ -3770,16 +3224,6 @@ double SpoofingDoa::circularSpanDeg(const std::vector<double> &degs)
         }
     }
     return 360.0 - maxGap;
-}
-
-double SpoofingDoa::foldHalfCycle(double deg)
-{
-    double r = fmod(normalizeAngle180(deg), 180.0);
-    if (r < 0)
-    {
-        r += 180.0;
-    }
-    return r;
 }
 
 double SpoofingDoa::circularSpan180Deg(const std::vector<double> &degs)
