@@ -144,7 +144,7 @@ struct InterferInfo // 用于测向的相关信息
 
 /**
  * @class ArithmeticDoa
- * @brief 测向算法核心类，封装相关干涉仪、幅相法、虚拟阵列扩展等测向方法
+ * @brief 测向算法核心类，封装相关干涉仪测向方法(理论模板生成、相关匹配、质量评估)
  */
 class ArithmeticDoa
 {
@@ -154,15 +154,59 @@ public:
 
 protected:
     /*==================相关干涉仪测向==================*/
+
+    /**
+     * @brief 计算均匀圆阵的理论相位差模板 [360角度][阵元]
+     * @param f         载波频率(Hz)
+     * @param r         阵列半径(米)
+     * @param antnnaNum 阵元数量
+     * @param theory    输出: 理论相位差模板(弧度)
+     */
     void calPhaseTheory(const double f, const double r, const int antnnaNum, std::vector<std::vector<double>> &theory);
+
+    /**
+     * @brief 计算搜索范围内实测相位差与理论模板的相关度伪谱
+     * @param phaseTheory 理论相位差模板
+     * @param data        实测信息(天线对、相位差、搜索范围)
+     * @param diff        输出: 各角度相关度
+     */
     void calPseudoByInterfer(const vector<vector<double>> phaseTheory, const InterferInfo data, vector<double> &diff);
+
+    /**
+     * @brief 相关干涉仪测向: 逐角度余弦相关匹配, 取最高相关峰对应角度
+     * @param phaseTheory 理论相位差模板
+     * @param data        实测信息(天线对、相位差、搜索范围)
+     * @param angle       输出: 最匹配来波角度(度)
+     * @param quality     输出: 测向质量(0-100)
+     * @param diff2       输出: 各角度相关度伪谱
+     */
     void calInterfer(const vector<vector<double>> phaseTheory, const InterferInfo data, double &angle, double &quality, vector<double> &diff2);
 
     /*==================天线对/基线扩展==================*/
+
+    /**
+     * @brief 由已知天线对相位差做传递闭合, 扩展出更多天线对基线
+     * @param cutSequence 天线对序列(输入, 并追加推导出的新天线对)
+     * @param phaseDiff   对应相位差(输入, 并追加推导出的新相位差)
+     */
     void setUseAntennaAndPhaseAll(vector<vector<int>> &cutSequence, vector<double> &phaseDiff);
 
     /*==================测向质量评估==================*/
+
+    /**
+     * @brief 计算测向质量分(0-100): 理论伪谱与实测伪谱的归一化相关, 限定角度范围
+     * @param diffTheory 理论伪谱
+     * @param diff       实测伪谱
+     * @param starAngle  起始角度(度)
+     * @param endAngle   结束角度(度)
+     */
     double getDoaMass(const vector<double> diffTheory, const vector<double> diff, int starAngle, int endAngle);
+
+    /**
+     * @brief 计算测向质量分(0-100): 全 360° 范围版本
+     * @param diffTheory 理论伪谱
+     * @param diff       实测伪谱
+     */
     double getDoaMass(const vector<double> diffTheory, const vector<double> diff);
 
 };
@@ -269,13 +313,56 @@ public:
     SpoofingDoa(void);
     ~SpoofingDoa(void);
 
-    void Init(void); // 初始化: 读取配置、初始化频率表、理论相位差、检测历史记录等
+    /**
+     * @brief 初始化引擎: 建立频率表、理论相位差模板、检测历史记录等全部运行状态
+     * @note 构造后即可按默认值运行(不读配置文件), 运行参数已内置在 Init 中
+     */
+    void Init(void);
 
+    /**
+     * @brief 设置某系统频点的欺骗检测阈值
+     * @param sys         卫星系统编码(0=GPS,1=GLONASS,2=SBAS,3=Galileo,4=BDS,5=QZSS)
+     * @param type        频点编码
+     * @param threshold   卫星数阈值(相位差聚成一簇的最小卫星数), -1 表示不修改
+     * @param phsThreshold 相位差检测阈值(度), <=0 表示不修改
+     * @note 当 sys==-1 且 type==-1 时, 用给定 threshold/phsThreshold 初始化全部频点
+     */
     void setThresholdDetectionDoa(int sys, int type, int threshold, double phsThreshold);
+
+    /**
+     * @brief 喂入一批 GNSS 原始数据并触发检测/测向
+     * @param data    GNSS 数据数组(按切刀序列排列)
+     * @param dataLen 数据条数(切刀数量)
+     */
     void setGNSSData(const GNSSData *data, int dataLen);
+
+    /**
+     * @brief 取出最近一轮的测向/报警结果
+     * @param result 输出结果(含各频点报警角度、卫星明细)
+     * @return 0=成功
+     */
     int getAngleSpoofingDoa(SpoofingResult &result);
+
+    /**
+     * @brief 设置切刀(天线对)序列
+     * @param len   数组长度(须为偶数, 每 2 个整数组成一对 {通道1天线, 通道2天线})
+     * @param cutSq 天线对序列, 两值相等表示校正刀(不参与测向)
+     */
     void setCutSquence(int len, const int *cutSq);
+
+    /**
+     * @brief 设置连续报警确认次数
+     * @param num 次数(1~10), 超出范围按 1 处理
+     */
     void setDetectionRecordNum(int num);
+
+    /**
+     * @brief 配置循环切刀运行方式
+     * @param cyclic      是否启用循环切刀检测
+     * @param oneCutFrams 每个切刀帧数(>0 才生效, 0=沿用旧值)
+     * @param smooth      是否多帧平滑(true=平滑, false=取末帧)
+     * @param omniR       全向天线阵列半径(米, >0 时重建理论模板)
+     */
     void configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR);
 
 private:
@@ -340,72 +427,132 @@ private:
 
 private:
     // ---- 频率与阵列参数 ----
-    std::map<int, double> m_F;
-    std::map<int, int> m_Detection_Threshold;
-    std::map<int, double> m_Detection_PhsThreshold;
-    std::map<int, double> m_R;
+    std::map<int, double> m_F;                        ///< 各频点载波频率(Hz), key=TypeInt(sys,type)=sys*100+type
+    std::map<int, int> m_Detection_Threshold;         ///< 各频点欺骗检测卫星数阈值(相位差聚簇的最小卫星数)
+    std::map<int, double> m_Detection_PhsThreshold;   ///< 各频点相位差检测阈值(单位:周)
+    std::map<int, double> m_R;                        ///< 各频点阵列半径(米)
 
     // ---- 检测模板数据 ----
-    std::map<int, std::vector<std::vector<double>>> m_Theory;
+    std::map<int, std::vector<std::vector<double>>> m_Theory;   ///< 各频点理论相位差模板 [360角度][阵元]
 
     // ---- 校正与处理结果 ----
-    std::map<int, std::map<int, SatelliteDataPhaseDiffA>> m_CorrectionData;
-    std::map<int, std::vector<AlarmData>> m_AngleResultData;
-    std::map<int, std::map<int, double>> m_Max_Snr;
+    std::map<int, std::map<int, SatelliteDataPhaseDiffA>> m_CorrectionData;   ///< 通道校正相位差(按频点/PRN)
+    std::map<int, std::vector<AlarmData>> m_AngleResultData;                  ///< 测向结果: 各频点报警卫星列表
+    std::map<int, std::map<int, double>> m_Max_Snr;                           ///< 各频点各星最大信噪比
 
     // =========================================================================
     // 循环切刀欺骗检测状态（对应 Python detection_lib.py）
     // =========================================================================
-    static const double CNR_MIN_DB;
-    static const double STABILITY_RANGE_DEG;
-    static const int MIN_STABLE_SAMPLES;
+    static const double CNR_MIN_DB;              ///< 参与检测的最小载噪比(dB-Hz)
+    static const double STABILITY_RANGE_DEG;     ///< 相位差稳定范围阈值(度)
+    static const int MIN_STABLE_SAMPLES;         ///< 判定稳定所需最小样本数
 
-    std::map<int, int> m_ConsecutiveAlarm;
+    std::map<int, int> m_ConsecutiveAlarm;       ///< 各频点连续报警计数
 
     struct TrackingInfo
     {
-        std::set<int> cluster_sats;
-        double doa_deg = -1.0;
-        double quality = -1.0;
+        std::set<int> cluster_sats;   ///< 被跟踪的欺骗卫星簇(PRN集合)
+        double doa_deg = -1.0;        ///< 当前跟踪的测向角度(度, -1=未确定)
+        double quality = -1.0;        ///< 当前跟踪的测向质量(0-100, -1=未确定)
     };
-    std::map<int, TrackingInfo> m_Tracking;
+    std::map<int, TrackingInfo> m_Tracking;      ///< 各频点欺骗跟踪状态
 
-    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;
+    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;  ///< 跨周期累计的基线相位差(补缺刀用)
 
 protected:
     // =========================================================================
-    // 配置与控制参数
+    // 配置与控制参数 (Configure / control parameters)
+    // 说明: 以下参数控制欺骗检测与测向引擎的行为。多数在 Init() 中会被默认值覆盖,
+    //       也可通过公开接口(如 configCyclicRuntime / setThresholdDetectionDoa)
+    //       在运行时调整。取值 0/1 的参数均为开关(0=关闭, 1=开启)。
     // =========================================================================
+
+    /// 连续报警确认次数: 某频点需连续 m_Detection_Recodds_Num 次检测到欺骗
+    /// 才将其卫星簇纳入跟踪, 用于滤除偶发跳变(对应 Python 的 ALARM_CONSECUTIVE_P)。
     int m_Detection_Recodds_Num = 1;
+
+    /// 阵列阵元数量(7)。
     int m_AntennaNum = 7;
+
+    /// 默认相位差检测阈值(度), 用于 initDetectionThreshold 初始化各频点阈值。
     double m_Phasediff_Threshold = 5;
+
+    /// 每个切刀位置的帧数: >1 时启用多帧平滑或取末帧处理(由 m_Smooth_Flag 决定方式)。
     int m_OneCut_Frams = 1;
+
+    /// 平滑标志: 1=对同一切刀多帧相位差做圆周均值平滑; 0=直接取末帧。
     int m_Smooth_Flag = 0;
+
+    /// 默认欺骗检测卫星数阈值(相位差聚簇的最小卫星数)。
     int m_Detection_Threshold_Num = 2;
+
+    /// 循环切刀检测开关: 1=启用跨轮循环切刀检测与跟踪(主流程)。
     int m_Cyclic_Detection_Flag = 0;
+
+    /// 是否打印原始 GNSSData 日志: 0=否, 1=是。
     int m_Save_Original_Flg = 0;
+
+    /// 参与测向/检测的最小载噪比阈值(dB-Hz): 低于该值的天线对/卫星被剔除。
     double m_Snr_Threshold = 0.0;
+
+    /// 测向质量阈值(0-100): 质量低于该值的测向结果被丢弃(不参与报警)。
     double m_Qulity_Threshold = 0.0;
+
+    /// 测向所需的最小有效切刀数: 有效切刀数低于该值则本轮不测向。
     int m_Doa_Cut_min_Num = 6;
+
+    /// 日志文件路径前缀(完整路径 = 前缀 + 序号 + ".log")。
     string m_LogFile = "./spoofingDoaLog_";
+
+    /// 是否剔除信噪比不全(某切刀 SNR 缺失)的卫星: 1=剔除, 0=保留。
     int m_Delete_Prn_Flag = 1;
+
+    /// 全向天线阵列半径(米): 直接决定理论相位差模板。
     double m_omni_R = 0.1865;
+
+    /// 切刀(天线对)序列: 每项 {通道1天线, 通道2天线}; 两值相等表示校正刀(不参与测向)。
+    /// 顺序对齐 Python CODE_TO_PAIR: 校正 {1,1} + 六测向刀 {1,2}..{1,7}。
     vector<vector<int>> m_cutSequence = {{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}};
 };
 
 
 // =============================================================================
 // GN902 接口类（保持与 interface.h / interface.cpp 调用的签名一致）
+// 对外 C 接口 Create_GN902 / SetThresholdDetection_GN902 / SetData_GN902 /
+// GetResult_GN902 / Release_GN902 最终都落到本类方法上。
 // =============================================================================
 class GN902
 {
 public:
-    GN902();
-    ~GN902();
+    GN902();   ///< 构造: 创建引擎并初始化循环切刀运行参数
+    ~GN902();  ///< 析构: 释放引擎
+
+    /**
+     * @brief 设置欺骗检测阈值
+     * @param phsDiffThreshold       位相差检测阈值(度)
+     * @param satelliteCountThreshold 卫星数阈值(相位差聚簇的最小卫星数)
+     * @param cutCountThreshold       连续确认刀数(>0 时生效, 对应连续报警确认次数)
+     * @param sysEnum                 卫星系统编码
+     * @param typeEnum                频点编码
+     */
     void SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, double cutCountThreshold, int sysEnum, int typeEnum);
+
+    /**
+     * @brief 流式喂入一帧数据
+     * @param data     本帧 GNSS 数据
+     * @param cutIdx_1 通道1天线索引(参考天线, 固定为 1)
+     * @param cutIdx_2 通道2天线索引(1=校正刀, 2..7=六测向刀)
+     * @note 校正刀再次出现时自动判定上一轮结束并触发检测+测向
+     */
     void SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2);
+
+    /**
+     * @brief 取最近一轮测向结果
+     * @param result 输出结果
+     */
     void GetResult(SpoofingResult& result);
+
 private:
-    void Detect();
-    void Doa();
+    void Detect();  ///< 整轮组批并喂入引擎, 完成循环切刀欺骗检测与跟踪
+    void Doa();     ///< 从引擎取出本轮测向结果
 };
