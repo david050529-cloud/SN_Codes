@@ -602,6 +602,14 @@ void ArithmeticDoa::calPseudoByInterfer(const vector<vector<double>> phaseTheory
     }
 }
 
+/**
+ * @brief 相关干涉仪测向: 在搜索角度范围内, 用理论相位差与实际相位差做相关匹配
+ * @param phaseTheory 理论相位差模板 [角度][阵元]
+ * @param data        实测信息(天线对、相位差、搜索范围)
+ * @param angle       输出: 最匹配的来波角度(度)
+ * @param quality     输出: 测向质量(0-100)
+ * @param diff2       输出: 各角度相关度伪谱
+ */
 void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const InterferInfo data, double &angle, double &quality, vector<double> &diff2)
 {
     diff2.resize(360);
@@ -653,6 +661,13 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
     }
 }
 
+/**
+ * @brief 计算均匀圆阵的理论相位差模板
+ * @param f         载波频率(Hz)
+ * @param r         阵列半径(米)
+ * @param antnnaNum 阵元数量
+ * @param theory    输出: 理论相位差模板 [360角度][阵元](弧度)
+ */
 void ArithmeticDoa::calPhaseTheory(const double f, const double r, const int antnnaNum, std::vector<std::vector<double>> &theory)
 {
     double perAngel = 2 * m_PI / antnnaNum;
@@ -992,7 +1007,11 @@ double ArithmeticDoa::getDoaMass(const vector<double> diffTheory, const vector<d
 // == 原 SpoofingDoa.cpp —— 核心引擎实现 =================================================
 // =============================================================================
 
-// 欺骗测向算法对象构造函数
+/**
+ * @brief 构造函数: 初始化项目并设置各系统频点的默认欺骗检测阈值
+ * @note 按项目型号(m_Project_flg)初始化阵元/切刀等参数, 再对 GPS/GLONASS/Galileo/BDS
+ *       各频点调用 setThresholdDetectionDoa 设置默认卫星数阈值与相位差阈值
+ */
 SpoofingDoa::SpoofingDoa(void){
     initProject();
     Init();
@@ -1010,6 +1029,11 @@ SpoofingDoa::SpoofingDoa(void){
     setThresholdDetectionDoa(4, 34, 3, 3.6);  // BDS B1X
 }
 
+/**
+ * @brief 初始化引擎全部运行状态
+ * @note 主要完成: 清空历史结果 → 设置阵列/切刀/检测等默认参数 → 建立频率表(initType)
+ *       → 初始化各频点检测阈值 → 按 m_Doa_Arithmetic 选择算法并建立理论模板
+ */
 void SpoofingDoa::Init(void){
 
     m_Angle_Accumulate.clear();
@@ -1088,6 +1112,11 @@ SpoofingDoa::~SpoofingDoa(void)
 {
 }
 
+/**
+ * @brief 喂入一批 GNSS 原始数据并触发检测/测向
+ * @param data    GNSS 数据数组
+ * @param dataLen 数据条数: 1=仅检测, 2=检测+校正, >2=按切刀序列测向
+ */
 void SpoofingDoa::setGNSSData(const GNSSData *data, int dataLen)
 {
     if (1 == dataLen) {
@@ -1117,6 +1146,11 @@ void SpoofingDoa::setGNSSData(const GNSSData *data, int dataLen)
     saveGNSSData(data, dataLen);
 }
 
+/**
+ * @brief 取出最近一轮的测向/报警结果
+ * @param result 输出结果(含各频点报警角度、卫星明细)
+ * @return 0=成功
+ */
 int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
 {
     setSpoofingResult(result);
@@ -1187,6 +1221,13 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
     result.i_Count = count;
 }
 
+/**
+ * @brief 测向主流程: 接收整轮切刀数据, 依次完成相位差计算→平滑→校正→欺骗检测→测向
+ * @param data    切刀数据数组(每项对应一个切刀位置)
+ * @param dataLen 切刀数量
+ * @note 流程: getSatelliteDataPhaseDiffA 提取相位差 → (可选)平滑 → 通道校正 →
+ *       循环切刀检测(累积跨轮基线) → 相关干涉仪/幅相法测向 → 更新跟踪状态
+ */
 void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
 {
     string nowT = getNowTime();
@@ -1595,6 +1636,12 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
     }
 }
 
+/**
+ * @brief 从一条基线数据提取测向所需的天线对与相位差, 填入 InterferInfo
+ * @param dataB  单星各切刀相位差数据
+ * @param info   输出: 测向输入信息(天线对/相位差/条数)
+ * @param doaFlg 输出: 1=有效(切刀数足够), 0=无效(切刀数不足)
+ */
 void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, InterferInfo &info, int &doaFlg)
 {
     doaFlg = 1;
@@ -1871,6 +1918,14 @@ void SpoofingDoa::setR(const string adr){
     }
 }
 
+/**
+ * @brief 设置某系统频点的欺骗检测阈值
+ * @param sys         卫星系统编码
+ * @param type        频点编码
+ * @param threshold   卫星数阈值(-1 不修改)
+ * @param phsThreshold 相位差阈值(度, <=0 不修改)
+ * @note sys==-1 && type==-1 时初始化全部频点
+ */
 void SpoofingDoa::setThresholdDetectionDoa(int sys, int type, int threshold, double phsThreshold)
 {
     PublicSpace::Log("Sys=%i,Type=%i,coutThreshold=%i,phsThreshold=%.1f\n", sys, type, threshold, phsThreshold);
@@ -1897,6 +1952,13 @@ void SpoofingDoa::resetCyclicDetection(void)
     m_Baselines.clear();
 }
 
+/**
+ * @brief 配置循环切刀运行方式
+ * @param cyclic      是否启用循环切刀检测
+ * @param oneCutFrams 每个切刀帧数(>0 生效)
+ * @param smooth      是否多帧平滑
+ * @param omniR       全向天线阵列半径(米, >0 且全向时重建理论模板)
+ */
 void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR)
 {
     m_Cyclic_Detection_Flag = cyclic ? 1 : 0;
@@ -2284,6 +2346,12 @@ void SpoofingDoa::setDetectionRecordNum(int num)
     }
 }
 
+/**
+ * @brief 从单帧 GNSS 双通道数据提取逐星相位差
+ * @param data  单帧 GNSS 数据(Port1/Port2 两通道)
+ * @param dataA 输出: 各卫星的相位差、信噪比(按 PRN/系统/频点对齐)
+ * @note 取两通道同名卫星的载波相位差(取小数部分, 归一化到 [0,1) 周)
+ */
 void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA)
 {
     dataA.clear();
@@ -2672,6 +2740,11 @@ void SpoofingDoa::calCorrecteData(SatelliteDataPhaseDiffA &dataA)
     }
 }
 
+/**
+ * @brief 相关干涉仪测向调度: 组测向输入信息 → 逐星测向
+ * @param dataB 各星相位差数据
+ * @note 按天线类型(全向/定向)选择不同的组信息方式, 再统一调用 calAngle 逐星测向
+ */
 void SpoofingDoa::getResultInterferDoa(vector<SatelliteDataPhaseDiffB> dataB)
 {
     string nowT = getNowTime();
@@ -2692,6 +2765,10 @@ void SpoofingDoa::getResultInterferDoa(vector<SatelliteDataPhaseDiffB> dataB)
     calAngle(inferInfoData);
 }
 
+/**
+ * @brief 建立相关干涉仪理论相位差模板
+ * @note 对每个频点调用 calPhaseTheory 生成模板; 若开启虚拟阵列(m_Virtual_Flag)再扩展
+ */
 void SpoofingDoa::initTheory(void){
     int typeInt = 0;
     double f = 0;
@@ -3261,6 +3338,15 @@ double SpoofingDoa::circularSpan180Deg(const std::vector<double> &degs)
     return 180.0 - maxGap;
 }
 
+/**
+ * @brief 欺骗检测核心: 判断某频点内卫星相位差是否聚成一簇(欺骗特征)
+ * @param typeInt            频点编码(sys*100+type)
+ * @param dataA              该频点各卫星相位差
+ * @param alarmSatelliteData 输出: 被判为欺骗的卫星
+ * @param alarm              输出: 1=报警(欺骗), 0=正常
+ * @note 算法: 筛出高信噪比卫星 → 相位差归一化到 180° → 找最大聚集窗口 →
+ *       聚集数超过阈值(m_Detection_Threshold)则报警
+ */
 void SpoofingDoa::calAlarmByPhaseDiff(int typeInt, const std::vector<SatelliteDataPhaseDiffA> &dataA, std::vector<SatelliteDataPhaseDiffA> &alarmSatelliteData, int &alarm)
 {
     alarmSatelliteData.clear();
