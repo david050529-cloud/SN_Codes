@@ -764,8 +764,8 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
             double angle;
             double quality;
             ArithmeticDoa::calInterfer(phaseTheory, tp_info, angle, quality, pseudoValue);
-            PublicSpace::Log("Sys=%d,Type=%d,Prn=%d,Fre=%.1f,R=%.4f,startAngle=%d,endAngle=%d,angle=%.2f,quality=%.2f\n",
-                             typeInt / 100, typeInt % 100, prn, m_F[typeInt], m_R[typeInt],
+            PublicSpace::Log("Sys=%s,Type=%s,Prn=%d,Fre=%.1f,R=%.4f,startAngle=%d,endAngle=%d,angle=%.2f,quality=%.2f\n",
+                             GetSysName(typeInt / 100), GetTypeName(typeInt / 100, typeInt % 100), prn, m_F[typeInt], m_R[typeInt],
                              tp_info.i_Start, tp_info.i_End, angle, quality);
             PublicSpace::Log("antenna and phasediff:[\n");
             for (int i = 0; i < tp_info.i_Phase_Len; i++)
@@ -991,7 +991,7 @@ void SpoofingDoa::setR(void){
  */
 void SpoofingDoa::setThresholdDetectionDoa(int sys, int type, int threshold, double phsThreshold)
 {
-    PublicSpace::Log("Sys=%i,Type=%i,coutThreshold=%i,phsThreshold=%.1f\n", sys, type, threshold, phsThreshold);
+    PublicSpace::Log("Sys=%s,Type=%s,coutThreshold=%i,phsThreshold=%.1f\n", GetSysName(sys), GetTypeName(sys, type), threshold, phsThreshold);
     if (-1 == sys && -1 == type)
     {
         initDetectionThreshold(threshold, phsThreshold);
@@ -1997,8 +1997,8 @@ void SpoofingDoa::LogSpoofingResult(const SpoofingResult result)
     PublicSpace::Log(" %s   Spoofing num = %d\n", nowT.c_str(), result.i_Count);
     for (int i = 0; i < result.i_Count; i++)
     {
-        PublicSpace::Log("Sys=%d,Type=%d,Count=%d,Angle=%.2f\n",
-                         result.i_SatelliteAngle[i].i_Sys, result.i_SatelliteAngle[i].i_Type, result.i_SatelliteAngle[i].i_Count, result.i_SatelliteAngle[i].i_Angle);
+        PublicSpace::Log("Sys=%s,Type=%s,Count=%d,Angle=%.2f\n",
+                         GetSysName(result.i_SatelliteAngle[i].i_Sys), GetTypeName(result.i_SatelliteAngle[i].i_Sys, result.i_SatelliteAngle[i].i_Type), result.i_SatelliteAngle[i].i_Count, result.i_SatelliteAngle[i].i_Angle);
         PublicSpace::Log("{\n");
         for (int j = 0; j < result.i_SatelliteAngle[i].i_Count; j++)
         {
@@ -2018,21 +2018,21 @@ void SpoofingDoa::LogGNSSData(const GNSSData data, int n)
         for (int i = 0; i < data.i_PortOneNum; i++)
         {
             tp = data.i_PortOne[i];
-            PublicSpace::Log("%d-1,Sys=%d,Type=%d,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);
+            PublicSpace::Log("%d-1,Sys=%s,Type=%s,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);
         }
         PublicSpace::Log("%d-2,i_PortTwoNum:%d\n", n, data.i_PortTwoNum);
         for (int i = 0; i < data.i_PortTwoNum; i++)
         {
             tp = data.i_PortTwo[i];
-            PublicSpace::Log("%d-2,Sys=%d,Type=%d,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);
+            PublicSpace::Log("%d-2,Sys=%s,Type=%s,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);
         }
     }
 }
 
 void SpoofingDoa::LogSatelliteDataPhaseDiffB(const SatelliteDataPhaseDiffB tp)
 {
-    PublicSpace::Log("Sys=%d,Type=%d,Prn=%d\n",
-                     tp.i_Sys, tp.i_Type, tp.i_Prn);
+    PublicSpace::Log("Sys=%s,Type=%s,Prn=%d\n",
+                     GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn);
     PublicSpace::Log("       snr1=[");
     for (int j = 0; j < tp.i_diffLen; j++)
     {
@@ -2060,8 +2060,8 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffB(const vector<SatelliteDataPhaseDiff
     for (unsigned int i = 0; i < dataB.size(); i++)
     {
         tp = dataB[i];
-        PublicSpace::Log("Sys=%d,Type=%d,Prn=%d\n",
-                         tp.i_Sys, tp.i_Type, tp.i_Prn);
+        PublicSpace::Log("Sys=%s,Type=%s,Prn=%d\n",
+                         GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn);
         PublicSpace::Log("       snr1=[");
         for (int j = 0; j < tp.i_diffLen; j++)
         {
@@ -2089,8 +2089,8 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffA(const vector<SatelliteDataPhaseDiff
     for (unsigned int i = 0; i < dataA.size(); i++)
     {
         SatelliteDataPhaseDiffA tp = dataA[i];
-        PublicSpace::Log("Sys=%d,Type=%d,Prn=%d,snr1=%.2f,snr2=%.2f,phasediff=%.2f\n",
-                         tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Snr1, tp.i_Snr2, tp.i_phase_diff * 360);
+        PublicSpace::Log("Sys=%s,Type=%s,Prn=%d,snr1=%.2f,snr2=%.2f,phasediff=%.2f\n",
+                         GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn, tp.i_Snr1, tp.i_Snr2, tp.i_phase_diff * 360);
     }
 }
 
@@ -2098,8 +2098,8 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffA(const SatelliteDataPhaseDiffA dataA
 {
 
     SatelliteDataPhaseDiffA tp = dataA;
-    PublicSpace::Log("Sys=%d,Type=%d,Prn=%d,snr1=%.2f,snr2=%.2f,phasediff=%.2f\n",
-                     tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Snr1, tp.i_Snr2, tp.i_phase_diff * 360);
+    PublicSpace::Log("Sys=%s,Type=%s,Prn=%d,snr1=%.2f,snr2=%.2f,phasediff=%.2f\n",
+                     GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn, tp.i_Snr1, tp.i_Snr2, tp.i_phase_diff * 360);
 }
 
 void SpoofingDoa::LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<SatelliteDataPhaseDiffA>> dataT)
@@ -2215,8 +2215,8 @@ static void collectFixedPairPhaseDiff(GN902State *st, const GNSSData *data, int 
     for (size_t i = 0; i < diff.size(); ++i)
     {
         const SatelliteDataPhaseDiffA &s = diff[i];
-        fprintf(fp, "  PRN=%d, Sys=%d, Type=%d, Snr1=%.1f, Snr2=%.1f, PhaseDiff=%.6f周(%.2f度)\n",
-                s.i_Prn, s.i_Sys, s.i_Type, s.i_Snr1, s.i_Snr2,
+        fprintf(fp, "  PRN=%d, Sys=%s, Type=%s, Snr1=%.1f, Snr2=%.1f, PhaseDiff=%.6f周(%.2f度)\n",
+                s.i_Prn, GetSysName(s.i_Sys), GetTypeName(s.i_Sys, s.i_Type), s.i_Snr1, s.i_Snr2,
                 s.i_phase_diff, s.i_phase_diff * 360.0);
     }
     fflush(fp);

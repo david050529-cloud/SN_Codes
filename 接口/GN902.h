@@ -54,6 +54,73 @@ using namespace std;
 #define m_C 3e8
 constexpr double PI = 3.14159265358979323846;
 
+// =============================================================================
+// 卫星系统 / 频点编码 → 可读名称(字母)映射，用于日志打印
+// =============================================================================
+
+// 卫星系统编码 → 名称
+inline const char* GetSysName(int sys)
+{
+    switch (sys)
+    {
+    case 0: return "GPS";
+    case 1: return "GLONASS";
+    case 2: return "SBAS";
+    case 3: return "Galileo";
+    case 4: return "BDS";
+    case 5: return "QZSS";
+    default: return "UNKNOWN";
+    }
+}
+
+// 频点编码 → 名称(字母)
+inline const char* GetTypeName(int sys, int type)
+{
+    int key = sys * 100 + type;
+    switch (key)
+    {
+    // GPS
+    case 0:   return "L1_CA";
+    case 2:   return "L5C";
+    case 5:   return "L2_P";
+    case 9:   return "L2_P_codeless";
+    case 14:  return "L5_Q";
+    case 16:  return "L1C";
+    case 17:  return "L2_C";
+    // GLONASS
+    case 100: return "G1";
+    case 101: return "G2";
+    case 105: return "G2_P";
+    case 106: return "G3";
+    // SBAS
+    case 200: return "L1_CA";
+    case 206: return "L5C";
+    // Galileo
+    case 301: return "E1_B";
+    case 302: return "E1C";
+    case 307: return "E6C";
+    case 312: return "E5a_Q";
+    case 317: return "E5b_Q";
+    case 320: return "AltBOC_Q";
+    // BDS
+    case 400: return "B1I";
+    case 417: return "B2I";
+    case 402: return "B3I";
+    case 408: return "B1C";
+    case 412: return "B2a";
+    case 419: return "B2b";
+    case 434: return "B1X";
+    case 449: return "B3I";
+    case 447: return "B3I";
+    // QZSS
+    case 500: return "L1_CA";
+    case 514: return "L5_Q";
+    case 517: return "L2_C";
+    case 516: return "L1C";
+    default:  return "UNKNOWN";
+    }
+}
+
 
 // =============================================================================
 // 公共工具命名空间 PublicSpace (原 publicFunctionDoa.h)
