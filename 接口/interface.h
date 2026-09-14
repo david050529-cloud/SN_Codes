@@ -147,6 +147,8 @@ EXTERN_C int Create_GN902(int &id);
 EXTERN_C int SetThresholdDetection_GN902(int id, double phsDiffThreshold, double satelliteCountThreshold, 
             double cutCountThreshold, int sysEnum, int typeEnum);
 // 一秒传入一次数据，cutIdx_1 通道1天线索引，cutIdx_2 通道2天线索引
+// 天线对 {8,9} 或 {9,8} 为固定基线采集模式：不参与循环切刀、不进入测向，
+// 仅逐星采集两端口载波相位差并写入日志文件(./gn902_phasediff.log)。
 EXTERN_C int SetData_GN902(int id, const GNSSData* data, int cutIdx_1, int cutIdx_2);
 EXTERN_C int GetResult_GN902(int id, SpoofingResult& result);
 EXTERN_C int Release_GN902(int id);

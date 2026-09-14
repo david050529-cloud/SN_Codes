@@ -337,6 +337,14 @@ public:
     void setGNSSData(const GNSSData *data, int dataLen);
 
     /**
+     * @brief 采集固定基线(如天线对{8,9}/{9,8})的两端口逐星载波相位差(原始)
+     * @param data  单帧 GNSS 数据(两通道)
+     * @param dataA 输出: 各卫星相位差, 仅含两端口同时出现的卫星(相位差单位: 周)
+     * @note 仅做采集: 不做信噪比过滤/通道校正/检测/测向
+     */
+    void collectPhaseDiffData(const GNSSData &data, std::vector<SatelliteDataPhaseDiffA> &dataA);
+
+    /**
      * @brief 取出最近一轮的测向/报警结果
      * @param result 输出结果(含各频点报警角度、卫星明细)
      * @return 0=成功

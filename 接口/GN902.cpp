@@ -484,6 +484,23 @@ void SpoofingDoa::setGNSSData(const GNSSData *data, int dataLen)
     saveGNSSData(data, dataLen);
 }
 
+void SpoofingDoa::collectPhaseDiffData(const GNSSData &data, std::vector<SatelliteDataPhaseDiffA> &dataA)
+{
+    // 固定基线原始相位差采集: 不按载噪比过滤(保留所有两端口同时出现的卫星)、
+    // 不做通道校正、不进入检测/测向。仅提取两端口同名卫星的载波相位差(小数部分)。
+    vector<SatelliteDataPhaseDiffA> raw;
+    getSatelliteDataPhaseDiffA(data, raw, false);
+    dataA.clear();
+    for (size_t i = 0; i < raw.size(); i++)
+    {
+        if (raw[i].i_phase_diff < 0)
+        {
+            continue; // 仅单端口出现的卫星, 无相位差, 跳过
+        }
+        dataA.emplace_back(raw[i]);
+    }
+}
+
 /**
  * @brief 取出最近一轮的测向/报警结果
  * @param result 输出结果(含各频点报警角度、卫星明细)
@@ -2002,8 +2019,9 @@ struct GN902State
     int curCut;                      // 当前帧所在切刀序号(-1=初始)
     std::vector<GNSSData> calFrames; // 储存的校正刀数据
     SpoofingResult result;           // 最近一轮测向结果
+    FILE *phaseDiffFp;               // 固定基线相位差采集日志(追加模式)
 
-    GN902State() : eng(0), curCut(-1) { clearResult(); }
+    GN902State() : eng(0), curCut(-1), phaseDiffFp(0) { clearResult(); }
 
     ~GN902State()
     {
@@ -2011,6 +2029,11 @@ struct GN902State
         {
             delete eng;
             eng = 0;
+        }
+        if (phaseDiffFp)
+        {
+            fclose(phaseDiffFp);
+            phaseDiffFp = 0;
         }
     }
 
@@ -2044,6 +2067,40 @@ static int mapPairToCutIndex(int cutIdx_1, int cutIdx_2)
         return cutIdx_2 - 1;
     }
     return -1;  // 非标准天线对(参考天线须为1)，忽略该帧
+}
+
+// 固定基线相位差采集：天线对 {8,9}/{9,8} 时不参与循环切刀、不进入测向，
+// 只逐星采集两端口载波相位差并写入日志文件(追加模式)。
+static const char *g_phaseDiffLogPath = "./gn902_phasediff.log";
+
+static void collectFixedPairPhaseDiff(GN902State *st, const GNSSData *data, int cutIdx_1, int cutIdx_2)
+{
+    if (st == 0 || data == 0 || st->eng == 0)
+    {
+        return;
+    }
+    if (st->phaseDiffFp == 0)
+    {
+        st->phaseDiffFp = fopen(g_phaseDiffLogPath, "a");
+    }
+    FILE *fp = st->phaseDiffFp;
+    if (fp == 0)
+    {
+        return;
+    }
+
+    std::vector<SatelliteDataPhaseDiffA> diff;
+    st->eng->collectPhaseDiffData(*data, diff);
+
+    fprintf(fp, "[固定基线采集] 天线对=(%d,%d) 双端卫星数=%d\n", cutIdx_1, cutIdx_2, (int)diff.size());
+    for (size_t i = 0; i < diff.size(); ++i)
+    {
+        const SatelliteDataPhaseDiffA &s = diff[i];
+        fprintf(fp, "  PRN=%d, Sys=%d, Type=%d, Snr1=%.1f, Snr2=%.1f, PhaseDiff=%.6f周(%.2f度)\n",
+                s.i_Prn, s.i_Sys, s.i_Type, s.i_Snr1, s.i_Snr2,
+                s.i_phase_diff, s.i_phase_diff * 360.0);
+    }
+    fflush(fp);
 }
 
 GN902::GN902(){
@@ -2110,6 +2167,12 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2){
     // 帧空则忽略
     if (data == 0)
     {
+        return;
+    }
+    // 特殊天线对 {8,9}/{9,8}：固定基线采集相位差，不参与循环切刀、不进入测向。
+    if ((cutIdx_1 == 8 && cutIdx_2 == 9) || (cutIdx_1 == 9 && cutIdx_2 == 8))
+    {
+        collectFixedPairPhaseDiff(st, data, cutIdx_1, cutIdx_2);
         return;
     }
     // 天线对 -> 切刀序号(0=校正{1,1}, 1..6=测向{1,2}..{1,7})；非标准对忽略该帧
