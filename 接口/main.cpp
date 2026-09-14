@@ -4215,7 +4215,7 @@ static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
         for (int j = 0; j < sa.i_Count; ++j)
         {
             const AlarmData& ad = sa.i_AlarmData[j];
-            gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%d Quality=%.2f\n",
+            gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%.1f Quality=%.2f\n",
                          ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
         }
     }
@@ -4426,9 +4426,22 @@ int main902(json jsonData)
             }
         }
 
-        // 末尾完整轮：用一帧空校正触发上一轮检测+测向
-        if (inRound && (doaMask & 0xFC) == 0xFC)
+        // 末尾轮：与 Python 一致，末尾不完整周期也逐刀处理。缺失的测向刀用空帧(无卫星)
+        // 补齐，使引擎仍按 7 刀(校正 + 六测向)组批；缺刀位的相位差由跨周期基线 m_Baselines
+        // 补缺，随后用一帧空校正触发上一轮检测+测向。
+        // 注意：仅当本周期已喂入至少一刀测向(doaMask!=0)时才flush，避免“最后恰为一校正刀”
+        // 时凭空多出一轮空结果。
+        if (doaMask != 0)
         {
+            for (int cut = 2; cut <= 7; ++cut)
+            {
+                if (!(doaMask & (1 << cut)))
+                {
+                    GNSSData emptyCut;
+                    memset(&emptyCut, 0, sizeof(emptyCut));
+                    SetData_GN902(id, &emptyCut, 1, cut);
+                }
+            }
             GNSSData dummyCal;
             memset(&dummyCal, 0, sizeof(dummyCal));
             SetData_GN902(id, &dummyCal, 1, 1);

@@ -442,7 +442,7 @@ void SpoofingDoa::Init(void){
     m_Phasediff_Threshold = 5.0;
     m_Detection_Threshold_Num = 2;
     m_Snr_Threshold = 35.0;
-    m_Qulity_Threshold = 0.0;
+    m_Qulity_Threshold = 10.0;
 
     m_Cyclic_Detection_Flag = 1;
     m_Delete_Prn_Flag = 1;
@@ -531,7 +531,7 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
         doas.reserve(tp.size());
         for (unsigned int i = 0; i < tp.size(); i++)
         {
-            doas.push_back((double)tp[i].i_Angle);
+            doas.push_back(tp[i].i_Angle);
         }
         angle = tp.empty() ? -1.0 : circularMeanDeg(doas);
         if (angle < 0)
@@ -679,7 +679,7 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
                 {
                     AlarmData ad;
                     ad.i_Prn = sid;
-                    ad.i_Angle = Round360((int)t.doa_deg);
+                    ad.i_Angle = t.doa_deg;
                     ad.i_Quality = t.quality;
                     ad.i_Snr = 0.0f;
                     if (m_Max_Snr.find(typeInt) != m_Max_Snr.end() && m_Max_Snr[typeInt].find(sid) != m_Max_Snr[typeInt].end())
@@ -743,7 +743,7 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
             }
 
             tp_alarm.i_Prn = prn;
-            tp_alarm.i_Angle = (int)angle;
+            tp_alarm.i_Angle = angle;
             tp_alarm.i_Quality = quality;
             tp_alarms.emplace_back(tp_alarm);
         }
@@ -762,7 +762,7 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
     doaFlg = 1;
     int diffLen = dataB.i_diffLen;
     int count = 0;
-    float maxSnr = 99;
+    float maxSnr = 0.0f;
 
     vector<vector<int>> tp_antnna;
     vector<double> tp_diff;
@@ -778,11 +778,11 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
             continue;
         }
 
-        if (dataB.i_Snr1[j] < maxSnr)
+        if (dataB.i_Snr1[j] > maxSnr)
         {
             maxSnr = dataB.i_Snr1[j];
         }
-        if (dataB.i_Snr2[j] < maxSnr)
+        if (dataB.i_Snr2[j] > maxSnr)
         {
             maxSnr = dataB.i_Snr2[j];
         }
@@ -801,10 +801,6 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
     int size = (int)tp_diff.size();
     int prn = dataB.i_Prn;
     int typeInt = TypeInt(dataB.i_Sys, dataB.i_Type);
-    if (diffLen > 1)
-    {
-        maxSnr = dataB.i_Snr1[1];
-    }
     m_Max_Snr[typeInt][prn] = maxSnr;
     for (int i = 0; i < size; i++)
     {
@@ -1004,6 +1000,7 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
+    std::set<int> roundAlarms; // 本轮任意测向刀报警的频点(对应 Python current_alarms)
 
     for (int j = 0; j < cutNum; ++j)
     {
@@ -1030,6 +1027,7 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
                     sids.insert(s.i_Prn);
                 }
                 cutAlarms[typeInt] = sids;
+                roundAlarms.insert(typeInt);
             }
         }
 
@@ -1066,12 +1064,11 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
         for (auto &sat : dataA[j])
         {
             int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
-            // 与 Python 对齐: 基线累积针对"已跟踪频点"的全部稳定卫星(而非仅 cluster_sats)。
-            // Python 在 build_vectors_and_detect 之后对 (current_alarms ∪ tracking) 频点的
-            // 全部稳定卫星累积 baselines[code]; 若此处仍限定 cluster_sats, 会在卫星尚未
-            // 聚入簇时漏掉其跨周期相位差, 导致部分卫星(如 14/24/42)测向基线不全或口径错位。
-            // 测向候选星仍由 getCrossCycleDataB 限定为 cluster_sats, 不影响检测结果。
-            if (m_Tracking.find(typeInt) != m_Tracking.end())
+            // 与 Python 对齐: 基线累积针对 (current_alarms ∪ tracking) 频点的全部稳定卫星
+            // (而非仅 cluster_sats 或仅已跟踪频点)。current_alarms 即本轮任意测向刀报警的
+            // 频点(roundAlarms), 首次报警(连续=1)那一轮也要累积基线, 否则会漏掉该轮跨周期
+            // 相位差。测向候选星仍由 getCrossCycleDataB 限定为 cluster_sats, 不影响检测结果。
+            if (m_Tracking.find(typeInt) != m_Tracking.end() || roundAlarms.find(typeInt) != roundAlarms.end())
             {
                 filtered.emplace_back(sat);
             }
@@ -1701,7 +1698,7 @@ void SpoofingDoa::setInterferInfoDataOmni(const std::vector<SatelliteDataPhaseDi
 }
 
 const double SpoofingDoa::CNR_MIN_DB = 35.0;
-const double SpoofingDoa::STABILITY_RANGE_DEG = 15.0;
+const double SpoofingDoa::STABILITY_RANGE_DEG = 10.0;
 const int SpoofingDoa::MIN_STABLE_SAMPLES = 3;
 
 double SpoofingDoa::normalizeAngle180(double deg)
@@ -1883,7 +1880,7 @@ void SpoofingDoa::LogSpoofingResult(const SpoofingResult result)
         PublicSpace::Log("{\n");
         for (int j = 0; j < result.i_SatelliteAngle[i].i_Count; j++)
         {
-            PublicSpace::Log("Prn=%d,Snr=%.1f,Angle=%d,Quality=%.2f;\n",
+            PublicSpace::Log("Prn=%d,Snr=%.1f,Angle=%.1f,Quality=%.2f;\n",
                              result.i_SatelliteAngle[i].i_AlarmData[j].i_Prn, result.i_SatelliteAngle[i].i_AlarmData[j].i_Snr, result.i_SatelliteAngle[i].i_AlarmData[j].i_Angle, result.i_SatelliteAngle[i].i_AlarmData[j].i_Quality);
         }
         PublicSpace::Log("}\n");

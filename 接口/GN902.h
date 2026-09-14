@@ -52,7 +52,7 @@ using namespace std;
 
 #define m_PI 3.14159265358979323846
 #define m_C 3e8
-constexpr double PI = 3.141592653;
+constexpr double PI = 3.14159265358979323846;
 
 
 // =============================================================================
@@ -249,7 +249,7 @@ struct AlarmData
     //   QZSS(5)     : 193~202
     int i_Prn;
     float i_Snr;      // 载噪比
-    int i_Angle;      // 测向角度
+    double i_Angle;   // 测向角度
     double i_Quality; // 测向质量（0-100）
 };
 
@@ -504,7 +504,7 @@ protected:
     double m_Snr_Threshold = 0.0;
 
     /// 测向质量阈值(0-100): 质量低于该值的测向结果被丢弃(不参与报警)。
-    double m_Qulity_Threshold = 0.0;
+    double m_Qulity_Threshold = 10.0;
 
     /// 测向所需的最小有效切刀数: 有效切刀数低于该值则本轮不测向。
     int m_Doa_Cut_min_Num = 6;
