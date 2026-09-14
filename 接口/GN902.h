@@ -278,34 +278,36 @@ struct SpoofingResult
 // =============================================================================
 #pragma pack(1)
 
-// 单颗卫星在两个通道间的相位差数据(细粒度)
+// 单颗卫星在两个通道间的相位差数据(细粒度, 单帧)
 struct SatelliteDataPhaseDiffA
 {
     int i_Prn;           // 卫星号
     int i_Sys;           // 卫星系统
     int i_Type;          // 卫星频点
-    float i_Snr1;        // 第一通道的载噪比(单位:dB-Hz)
-    float i_Snr2;        // 第二通道的载噪比(单位:dB-Hz)
-    double i_phase_diff; // 载波相位差，单位：周
+    float i_Snr1;        // 第一通道(PortOne)的载噪比(单位:dB-Hz)
+    float i_Snr2;        // 第二通道(PortTwo)的载噪比(单位:dB-Hz)
+    double i_phase_diff; // 载波相位差(单位:周, [0,1)); 符号=PortOne−PortTwo; =−1 表示仅单端口出现
 };
 
-// 单颗卫星在各切刀位置的相位差数据(粗粒度)
+// 单颗卫星在各切刀位置的相位差数据(粗粒度, 一轮)
 struct SatelliteDataPhaseDiffB
 {
     int i_Prn;  // 卫星号
     int i_Sys;  // 卫星系统
     int i_Type; // 卫星频点
-    int i_diffLen;                           // 有效相位差数量(有效切刀数)
-    float i_Snr1[100] = {0.0};               // 第一通道的载噪比，索引对应切刀序号
-    float i_Snr2[100] = {0.0};               // 第二通道的载噪比，与切刀序号一一对应
-    double i_phase_diff[100] = {0.0};        // 载波相位差(单位:周)，与切刀序号一一对应
+    int i_diffLen;                           // 有效相位差数量(= 一轮切刀数, 通常7)
+    float i_Snr1[100] = {0.0};               // 第一通道(PortOne)的载噪比，索引=切刀序号
+    float i_Snr2[100] = {0.0};               // 第二通道(PortTwo)的载噪比，与切刀序号一一对应
+    double i_phase_diff[100] = {0.0};        // 载波相位差(单位:周)，符号=PortOne−PortTwo，索引=切刀序号
 };
 
 #pragma pack()
 
 // =============================================================================
 // SpoofingDoa 主类
-// 继承自 ArithmeticDoa，实现欺骗干扰检测与测向的完整流程
+// 继承自 ArithmeticDoa，实现欺骗干扰检测与测向的完整流程。
+// 一轮处理流程见 GN902.cpp 文件头部"模块级说明"：提取相位差 → 平滑/取末帧 →
+// 通道校正 → 聚类检测+跟踪 → 跨周期基线累积 → 相关干涉仪测向。
 // =============================================================================
 class SpoofingDoa : public ArithmeticDoa
 {
@@ -486,6 +488,7 @@ protected:
     double m_Phasediff_Threshold = 5;
 
     /// 每个切刀位置的帧数: >1 时启用多帧平滑或取末帧处理(由 m_Smooth_Flag 决定方式)。
+    /// 实际使用中每刀只喂最后一秒(1帧)，即 oneCutFrams=1，平滑/取末帧路径不生效。
     int m_OneCut_Frams = 1;
 
     /// 平滑标志: 1=对同一切刀多帧相位差做圆周均值平滑; 0=直接取末帧。

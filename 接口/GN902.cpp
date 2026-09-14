@@ -15,6 +15,35 @@
 // =============================================================================
 #include "GN902.h"
 
+// =============================================================================
+// 模块级说明 —— 数据流与算法约定（重要）
+// =============================================================================
+//
+// 【切刀(天线对)循环】
+//   一轮 = 1 个校正刀 + 6 个测向刀，共 7 刀：
+//     校正刀 {1,1}：两端口接同一根天线，测的是通道间固定相位差，用于"通道校正"。
+//     测向刀 {1,2}..{1,7}：通道1固定接参考天线1，通道2依次切换到天线2..7，
+//                          用于相位差检测(聚类)与相关干涉仪测向(DOA)。
+//   切刀序列由 m_cutSequence 表示，顺序对齐 Python 的 CODE_TO_PAIR:
+//     code 0→{1,1}(校正), 9→{1,2}, 57→{1,3}, 17→{1,4}, 25→{1,5}, 33→{1,6}, 1→{1,7}。
+//
+// 【相位差符号约定】
+//   本模块 i_phase_diff = frac(PortOne.Phase − PortTwo.Phase)，单位"周"，归一化到 [0,1)。
+//   与 Python detection_lib 的 phase_diff = (port2 − port1) mod 360° 符号相反，
+//   但本模块内部"数据生成 / 校正偏移 / DOA 理论模板"三者统一用 port1−port2 约定，
+//   符号翻转在相关干涉仪的 cos() 中互相抵消，最终测向角度与 Python 一致。
+//
+// 【一轮处理流水线】(SpoofingDoa::setDataAngle)
+//   1. getSatelliteDataPhaseDiffA   逐刀提取两端口同名卫星的载波相位差(周)。
+//   2. (可选)getSmoothData / getEndFramData  每刀多帧平滑或取末帧(每刀1帧时跳过)。
+//   3. setCorrectionData / getCorrectedGnssData  用校正刀算通道偏移并扣除。
+//   4. getCyclicDetectionData  逐刀按相位差聚类做欺骗检测 + 连续确认 + 跟踪；
+//                              并只保留"本轮报警 ∪ 已跟踪"频点的卫星供基线累积。
+//   5. accumulateBaselines + getCrossCycleDataB  跨周期累积每星 6 条测向基线，
+//                              缺刀位用上一周期相位差补缺。
+//   6. getResultInterferDoa  相关干涉仪逐星测向，汇总报警角度。
+// =============================================================================
+
 using namespace std;
 
 // =============================================================================
@@ -514,6 +543,15 @@ int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
     return 0;
 }
 
+/**
+ * @brief 汇总最近一轮的报警结果: 每个报警频点输出欺骗来向角度(逐星圆周均值)与卫星明细
+ *
+ * 遍历 m_AngleResultData(各频点报警卫星列表)，对每个频点：
+ *   - 把该频点各报警卫星的测向角做圆周均值(circularMeanDeg)，归一化到 [0,360) 作为来向角度；
+ *   - 逐星填入 AlarmData(PRN/角度/质量)，并用 m_Max_Snr 覆盖其信噪比；
+ *   - i_Alarm 恒为 1(报警)，i_Count 为该频点报警卫星数。
+ * 注意来向角度是"报警卫星测向角的圆周均值"，若个别卫星因半周模糊偏 180°，会拉偏均值。
+ */
 void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
 {
     int count = 0;
@@ -753,6 +791,14 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
 
 /**
  * @brief 从一条基线数据提取测向所需的天线对与相位差, 填入 InterferInfo
+ *
+ * 从 dataB 的 7 刀中跳过校正刀(j=0)，收集 6 条测向刀(天线对 {1,2}..{1,7})的有效相位差
+ * (两端口信噪比都 >1e-6)。仅使用这 6 条基线，不做 setUseAntennaAndPhaseAll 的天线对传递
+ * 扩展——扩展会引入半周歧义(180° 翻转)，使同一卫星在测向轮之间角度来回跳变(352°↔172°)。
+ * 有效切刀数不足 m_Doa_Cut_min_Num(默认6)则 doaFlg=0，本轮该星不参与测向。
+ * 顺带统计该星最大信噪比(取 6 条测向刀两端口中的最大值)写入 m_Max_Snr，供结果输出。
+ * 相位差由"周"转"弧度"(×2π)后填入 InterferInfo.i_Phase_Diff(与理论模板单位一致)。
+ *
  * @param dataB  单星各切刀相位差数据
  * @param info   输出: 测向输入信息(天线对/相位差/条数)
  * @param doaFlg 输出: 1=有效(切刀数足够), 0=无效(切刀数不足)
@@ -997,6 +1043,19 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
                      m_Cyclic_Detection_Flag, m_OneCut_Frams, m_Smooth_Flag, m_omni_R);
 }
 
+/**
+ * @brief 循环切刀欺骗检测 + 连续确认 + 跟踪 + 基线筛选
+ *
+ * 分两阶段：
+ *   第一阶段(逐刀)：对每个测向刀按频点聚类(calAlarmByPhaseDiff)判报警；维护各频点连续报警
+ *   计数 m_ConsecutiveAlarm——本刀报警则 +1，连续达到 m_Detection_Recodds_Num 后把该刀报警
+ *   卫星并入 m_Tracking 的 cluster_sats(欺骗卫星簇)；本刀未报警则清零，且未进入跟踪的频点
+ *   其跨周期基线 m_Baselines 被清空。同时收集本轮所有报警频点到 roundAlarms。
+ *   第二阶段(筛选)：只保留 (m_Tracking ∪ roundAlarms) 频点的卫星，供后续 accumulateBaselines
+ *   累积跨周期基线。这样首次报警(连续=1)那一轮也能累积基线，对齐 Python 的 current_alarms∪tracking。
+ *
+ * @param dataA 各切刀逐星相位差(已校正)，本函数会原地筛选为"本轮报警∪已跟踪"频点的卫星
+ */
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
@@ -1077,6 +1136,16 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
     }
 }
 
+/**
+ * @brief 跨周期累积每星各切刀的基线相位差(补缺刀用)
+ *
+ * 把本轮得到的每星相位差(dataB)写入 m_Baselines[typeInt][prn]：
+ *   - 首次出现 → 整体存入；
+ *   - 已存在 → 仅覆盖本轮信噪比有效的切刀位(有效位才更新)，其余切刀位保留上一周期的旧值。
+ * 这样当某星在本轮缺某刀时，该刀位自动用上一周期(甚至更早)的相位差补缺，使测向凑齐 6 条基线。
+ * 注意：基线存的是"校正后"相位差；校正偏移每轮由校正刀重算，若偏移跨轮漂移，
+ * 旧基线可能与新基线口径不一致(该行为与 Python 一致)。
+ */
 void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB> &dataB)
 {
     for (const auto &b : dataB)
@@ -1104,6 +1173,14 @@ void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB>
     }
 }
 
+/**
+ * @brief 从跨周期基线库中取出当前跟踪频点 cluster_sats 各星的基线数据(供测向)
+ *
+ * 测向候选星只取"被跟踪(cluster_sats)"的卫星，逐星从 m_Baselines 取已累积的基线
+ * (可能混有上一周期补缺的刀位)，交给 getResultInterferDoa 测向。
+ * 注意：哪些频点/卫星被写入 m_Baselines 由 getCyclicDetectionData 决定(本轮报警 ∪ 已跟踪)，
+ * 这里只做"取用"——不在 cluster_sats 里的卫星即便有基线也不会参与测向。
+ */
 void SpoofingDoa::getCrossCycleDataB(std::vector<SatelliteDataPhaseDiffB> &doaDataB)
 {
     doaDataB.clear();
@@ -1234,10 +1311,21 @@ void SpoofingDoa::setDetectionRecordNum(int num)
 }
 
 /**
- * @brief 从单帧 GNSS 双通道数据提取逐星相位差
- * @param data  单帧 GNSS 数据(Port1/Port2 两通道)
- * @param dataA 输出: 各卫星的相位差、信噪比(按 PRN/系统/频点对齐)
- * @note 取两通道同名卫星的载波相位差(取小数部分, 归一化到 [0,1) 周)
+ * @brief 从单帧 GNSS 双通道数据提取逐星相位差(细粒度 SatelliteDataPhaseDiffA)
+ *
+ * 遍历 PortOne 中每个"未重复"的卫星(按 PRN/系统/频点去重)，在 PortTwo 中找同名卫星：
+ *   - 匹配成功 → i_phase_diff = frac(PortOne.Phase − PortTwo.Phase)，单位"周"，归一化到 [0,1)。
+ *     注意符号：这是 Port1−Port2，与 Python 的 port2−port1 相反(见文件头部"符号约定")；
+ *     但"数据/校正/模板"三者统一该约定，相关干涉仪 cos() 中符号翻转互相抵消，测向角一致。
+ *   - 匹配失败 → i_phase_diff = −1，标记"仅单端口出现"，后续被 getSatelliteDataPhaseDiffB
+ *     按信噪比缺省剔除(仅此单端口存在，无有效相位差)。
+ * 只处理 m_F 中登记过的频点；PortTwo 中剩余未匹配的卫星也以 i_phase_diff=−1 补入(补全另一端口)。
+ *
+ * @param data     单帧 GNSS 数据(Port1/Port2 两通道)
+ * @param dataA    输出: 各卫星相位差/信噪比列表(按 PRN/系统/频点对齐)
+ * @param snrFilter true=仅保留两端口信噪比都 ≥ m_Snr_Threshold 的卫星(测向刀);
+ *                  false=不过滤(校正刀, 用全部匹配卫星算通道偏移, 与 Python compute_calibration 一致)
+ * @note 载波相位差取小数部分(周)：整数周(整周期模糊度)在相关干涉仪中不贡献方向信息，直接丢弃。
  */
 void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA, bool snrFilter)
 {
@@ -1465,6 +1553,22 @@ void SpoofingDoa::setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>
     calCorrectionOffset(calCuts);
 }
 
+/**
+ * @brief 由校正刀数据计算各频点的通道校正偏移(相位差, 单位"周")
+ *
+ * 校正刀 {1,1} 两端口接同一根天线，因此同星相位差只反映两通道之间的固定相位偏移。
+ * 对每颗"稳定"卫星(相位差最小覆盖弧 circularSpanDeg < STABILITY_RANGE_DEG 且采样数足够)
+ * 取圆周均值作为该星的通道偏移；再对同频点各星偏移取圆周均值，得到该频点的统一校正偏移。
+ *
+ * 关键区别(与 Python compute_calibration 一致)：
+ *   - GLONASS(sys==1) 为 FDMA，各卫星频率不同、通道偏移逐星而异 → 按 (频点, PRN) 逐星存偏移。
+ *   - 其余系统(CDMA) → 同频点各星共用同一偏移，存于 key=−1(PRN 占位)。
+ *
+ * 注意校正刀不按信噪比过滤(见 setDataAngle 的 isCalCut 分支)，否则低信噪比卫星被剔除
+ * 会使校正偏移整体漂移(可达上百度)，导致测向角度错位。
+ *
+ * @param calCuts 校正刀数据(每个校正刀一帧的逐星相位差列表)
+ */
 void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiffA>> &calCuts)
 {
     map<int, map<int, vector<double>>> samples;
@@ -1591,6 +1695,15 @@ void SpoofingDoa::getCorrectedGnssData(vector<vector<SatelliteDataPhaseDiffA>> &
     }
 }
 
+/**
+ * @brief 对单颗卫星的相位差扣除通道校正偏移(单位: 周)
+ *
+ * 从 m_CorrectionData 取出该星对应偏移并相减：
+ *   - GLONASS(sys==1)：按 PRN 取逐星偏移(FDMA，各星通道偏移不同)。
+ *   - 其余系统：取频点统一偏移(key=−1)。
+ * 无偏移记录或该星信噪比不完整(任一端口 <1e-3，视为无有效相位差)则不改动。
+ * 校正后 i_phase_diff ≈ 纯几何相位差(天线1 与 天线k 之间的来波相位差)。
+ */
 void SpoofingDoa::calCorrecteData(SatelliteDataPhaseDiffA &dataA)
 {
     int typeInt = TypeInt(dataA.i_Sys, dataA.i_Type);
@@ -1791,12 +1904,21 @@ double SpoofingDoa::circularSpan180Deg(const std::vector<double> &degs)
 
 /**
  * @brief 欺骗检测核心: 判断某频点内卫星相位差是否聚成一簇(欺骗特征)
+ *
+ * 算法(对应 Python cluster_satellites, fold_half=False)：
+ *   1. 筛出两端口信噪比都 ≥ CNR_MIN_DB 的高信噪比卫星。
+ *   2. 校正后相位差(周) ×360 转角度，再用 normalizeAngle180 归一化到 [-180°, 180°)。
+ *   3. 排序后复制一份整体 +360°(解决簇跨 ±180°/0° 边界被漏掉的问题)，用滑动窗口找
+ *      "最大覆盖弧 < phsThreshold" 的最大卫星集合；窗口最多含 n 颗，避免同一颗星被其
+ *      复制份重复计数。
+ *   4. 若最大集合卫星数 > m_Detection_Threshold[typeInt] 则判为欺骗报警。
+ *
+ * 物理含义：真实卫星来自不同方向，相位差分散；欺骗信号同源，相位差会聚成一簇。
+ *
  * @param typeInt            频点编码(sys*100+type)
- * @param dataA              该频点各卫星相位差
- * @param alarmSatelliteData 输出: 被判为欺骗的卫星
+ * @param dataA              该频点各卫星相位差(已校正)
+ * @param alarmSatelliteData 输出: 被判为欺骗的卫星列表
  * @param alarm              输出: 1=报警(欺骗), 0=正常
- * @note 算法: 筛出高信噪比卫星 → 相位差归一化到 180° → 找最大聚集窗口 →
- *       聚集数超过阈值(m_Detection_Threshold)则报警
  */
 void SpoofingDoa::calAlarmByPhaseDiff(int typeInt, const std::vector<SatelliteDataPhaseDiffA> &dataA, std::vector<SatelliteDataPhaseDiffA> &alarmSatelliteData, int &alarm)
 {
@@ -2150,7 +2272,11 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     return;
 }
 
-// 设置数据
+// 设置数据(流式喂入一帧)
+// 轮边界 = 校正刀(天线对{1,1})再次出现：此时上一轮(校正+六测向)已完整结束，
+// 触发 Detect()+Doa() 结算上一轮，然后清空缓冲、把当前校正刀作为新一轮的第一帧。
+// 特殊天线对 {8,9}/{9,8} 为固定基线采集模式，不参与循环切刀、不进入测向。
+// 注意：实际使用中每刀只喂最后一秒(1帧)，故每轮每刀只累积 1 帧(oneCutFrams=1, 不平滑)。
 // @param data 数据指针
 // @param cutIdx_1 通道1天线索引(参考天线，固定为1)
 // @param cutIdx_2 通道2天线索引(1=校正, 2..7=六测向刀)
@@ -2208,8 +2334,16 @@ void GN902::GetResult(SpoofingResult& result){
     return;
 }
 
-// 检测
-// 整轮组批并喂入引擎，完成循环切刀欺骗检测与跟踪(跨轮状态在引擎内连续累积)。
+// 检测(整轮组批)
+// 把当前轮缓冲的逐帧数据按"引擎行序"重新组批：row0=校正刀, row1..6=六测向刀，
+// 然后一次性喂入引擎，完成循环切刀欺骗检测与跟踪(跨轮状态在引擎内连续累积)。
+//
+// 组批要点：
+//   - 校正刀(cut=0)存入 st->calFrames(每轮刷新)；六测向刀(cut=1..6)按切刀序号分桶(detByCut)。
+//   - 若六刀帧数一致(C)且校正帧数 ≥ C，则取校正帧末尾 C 帧 + 每刀 C 帧，得到 7×C 的 batch
+//     (oneCutFrams=C, smooth=true)；否则每行取末帧(oneCutFrams=1, smooth=false)。
+//   - 六刀必须齐全，缺刀则丢弃本轮(实际使用中每刀只喂 1 帧，main902 在末尾用空帧补齐缺刀)。
+//   - 组批后调用 configCyclicRuntime 设定本轮 oneCutFrams/smooth，再 setGNSSData 喂入引擎。
 void GN902::Detect(){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
     if (it == g_gn902State.end() || it->second->eng == 0)
