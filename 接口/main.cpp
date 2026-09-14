@@ -4234,6 +4234,24 @@ int main902(json jsonData)
     logFile = jsonData.count("logFile") ? jsonData["logFile"].get<std::string>() : "./gn902_result.log";
     int switchSeconds = jsonData.count("switchSeconds") ? jsonData["switchSeconds"].get<int>() : 1;
 
+    // 固定基线采集模式(可选): 配置里提供 fixedPair=[通道1天线,通道2天线] 时，
+    // 不按 debug 切刀时刻表做循环切刀，而是把每个公共 GPS 秒作为该固定天线对
+    // 喂入 SetData_GN902(仅采集相位差，不检测/测向)。
+    std::vector<int> fixedPair;
+    if (jsonData.count("fixedPair") && jsonData["fixedPair"].is_array())
+    {
+        for (auto &v : jsonData["fixedPair"])
+        {
+            fixedPair.push_back(v.get<int>());
+        }
+    }
+    bool collectMode = (fixedPair.size() == 2);
+    if (collectMode && !((fixedPair[0] == 8 && fixedPair[1] == 9) || (fixedPair[0] == 9 && fixedPair[1] == 8)))
+    {
+        printf("[GN902] fixedPair 仅支持 [8,9] 或 [9,8]（当前为 [%d,%d]）\n", fixedPair[0], fixedPair[1]);
+        return 1;
+    }
+
     // 定位 dat 文件
     if (port0File.empty() || port1File.empty())
     {
@@ -4248,7 +4266,7 @@ int main902(json jsonData)
             return 1;
         }
     }
-    if (debugFile.empty())
+    if (!collectMode && debugFile.empty())
     {
         printf("[GN902] 需提供 debugFile\n");
         return 1;
@@ -4260,6 +4278,11 @@ int main902(json jsonData)
     printf("  端口1 dat : %s\n", port1File.c_str());
     printf("  debug     : %s\n", debugFile.c_str());
     printf("  日志      : %s\n", logFile.c_str());
+    printf("  模式      : %s\n", collectMode ? "固定基线采集(相位差)" : "循环切刀检测+测向");
+    if (collectMode)
+    {
+        printf("  固定天线对: (%d,%d)\n", fixedPair[0], fixedPair[1]);
+    }
     printf("================================================================\n");
 
     // ---- 2. 打开结果日志 ----
@@ -4270,42 +4293,57 @@ int main902(json jsonData)
     std::map<double, std::vector<SatelliteData>> port1 = parseDatPort(port1File);
     gn902LogLine(logFp, "端口0 帧数: %d, 端口1 帧数: %d\n", (int)port0.size(), (int)port1.size());
 
-    // ---- 4. 解析切刀时刻表 ----
-    std::vector<std::pair<double, int>> schedule = parseDebugSchedule(debugFile);
-    gn902LogLine(logFp, "切刀切换点: %d 个\n", (int)schedule.size());
-
-    // ---- 5. 公共 GPS 秒 + 赋 code ----
+    // ---- 4. 公共 GPS 秒（两端口同时出现的时刻）----
     std::vector<double> common;
     for (auto& kv : port0) if (port1.count(kv.first)) common.push_back(kv.first);
     std::sort(common.begin(), common.end());
 
-    std::vector<std::pair<double, int>> tagged;   // (sec, code)
-    for (double sec : common)
-    {
-        int code = activeCode(sec, schedule);
-        if (code < 0) continue;
-        tagged.push_back({ sec, code });
-    }
-
-    // ---- 6. 按 code 分刀(runs)，每刀去末尾过渡秒、保留末尾 switchSeconds 个稳定秒 ----
-    struct Run { int code; std::vector<double> secs; };
-    std::vector<Run> runs;
-    for (auto& t : tagged)
-    {
-        if (!runs.empty() && runs.back().code == t.second) runs.back().secs.push_back(t.first);
-        else runs.push_back({ t.second, { t.first } });
-    }
-    int settleN = (switchSeconds > 0) ? switchSeconds : 1;
+    // ---- 5. 生成喂帧序列 ----
     std::vector<std::pair<double, int>> feedFrames;   // (sec, code) 时间升序
-    for (auto& run : runs)
+    if (collectMode)
     {
-        std::vector<double> settled;
-        if (run.secs.size() > 1) settled.assign(run.secs.begin(), run.secs.end() - 1);
-        else settled = run.secs;
-        int start = std::max(0, (int)settled.size() - settleN);
-        for (int i = start; i < (int)settled.size(); ++i) feedFrames.push_back({ settled[i], run.code });
+        // 固定基线采集: 每个公共 GPS 秒都作为该固定天线对喂入(code 仅占位)
+        for (double sec : common)
+        {
+            feedFrames.push_back({ sec, 0 });
+        }
+        gn902LogLine(logFp, "固定基线采集喂帧: %d 帧(天线对 %d,%d)\n",
+                     (int)feedFrames.size(), fixedPair[0], fixedPair[1]);
     }
-    gn902LogLine(logFp, "检测喂帧: %d 帧\n", (int)feedFrames.size());
+    else
+    {
+        // ---- 解析切刀时刻表 ----
+        std::vector<std::pair<double, int>> schedule = parseDebugSchedule(debugFile);
+        gn902LogLine(logFp, "切刀切换点: %d 个\n", (int)schedule.size());
+
+        // 赋 code
+        std::vector<std::pair<double, int>> tagged;   // (sec, code)
+        for (double sec : common)
+        {
+            int code = activeCode(sec, schedule);
+            if (code < 0) continue;
+            tagged.push_back({ sec, code });
+        }
+
+        // 按 code 分刀(runs)，每刀去末尾过渡秒、保留末尾 switchSeconds 个稳定秒
+        struct Run { int code; std::vector<double> secs; };
+        std::vector<Run> runs;
+        for (auto& t : tagged)
+        {
+            if (!runs.empty() && runs.back().code == t.second) runs.back().secs.push_back(t.first);
+            else runs.push_back({ t.second, { t.first } });
+        }
+        int settleN = (switchSeconds > 0) ? switchSeconds : 1;
+        for (auto& run : runs)
+        {
+            std::vector<double> settled;
+            if (run.secs.size() > 1) settled.assign(run.secs.begin(), run.secs.end() - 1);
+            else settled = run.secs;
+            int start = std::max(0, (int)settled.size() - settleN);
+            for (int i = start; i < (int)settled.size(); ++i) feedFrames.push_back({ settled[i], run.code });
+        }
+        gn902LogLine(logFp, "检测喂帧: %d 帧\n", (int)feedFrames.size());
+    }
 
     // ---- 7. 创建 GN902 对象 ----
     int id = 0, ret = 0;
@@ -4329,64 +4367,83 @@ int main902(json jsonData)
     }
 
     // ---- 8. 流式喂入 ----
-    // 一轮 = 校正刀(1,1) + 六刀测向(1,2)..(1,7)；校正刀再次出现触发上一轮检测+测向。
-    // 缺刀的轮次（如末尾不完整周期）会被引擎丢弃，与 Python 流程一致。
-    int roundIdx = 0;
-    int doaMask = 0;
-    bool inRound = false;
-    int totalAlarmCount = 0;
-
-    for (auto& fr : feedFrames)
+    if (collectMode)
     {
-        int cutIdx2 = codeToPair(fr.second);
-        if (cutIdx2 < 1 || cutIdx2 > 7) continue;
-
-        auto it0 = port0.find(fr.first);
-        auto it1 = port1.find(fr.first);
-        GNSSData frame = buildGnssData(
-            it0 != port0.end() ? it0->second : std::vector<SatelliteData>(),
-            it1 != port1.end() ? it1->second : std::vector<SatelliteData>());
-
-        if (cutIdx2 == 1)
+        // 固定基线采集: 每个公共 GPS 秒作为固定天线对喂入，仅采集相位差(写入日志)
+        int collectCount = 0;
+        for (auto& fr : feedFrames)
         {
-            // 校正刀：先喂（触发上一轮检测+测向），再结算上一轮结果
-            SetData_GN902(id, &frame, 1, 1);
-            if (inRound && (doaMask & 0xFC) == 0xFC)
+            auto it0 = port0.find(fr.first);
+            auto it1 = port1.find(fr.first);
+            GNSSData frame = buildGnssData(
+                it0 != port0.end() ? it0->second : std::vector<SatelliteData>(),
+                it1 != port1.end() ? it1->second : std::vector<SatelliteData>());
+            SetData_GN902(id, &frame, fixedPair[0], fixedPair[1]);
+            collectCount++;
+        }
+        gn902LogLine(logFp, "固定基线采集完成: 共 %d 帧(逐星相位差见 ./gn902_phasediff.log)\n", collectCount);
+    }
+    else
+    {
+        // 一轮 = 校正刀(1,1) + 六刀测向(1,2)..(1,7)；校正刀再次出现触发上一轮检测+测向。
+        // 缺刀的轮次（如末尾不完整周期）会被引擎丢弃，与 Python 流程一致。
+        int roundIdx = 0;
+        int doaMask = 0;
+        bool inRound = false;
+        int totalAlarmCount = 0;
+
+        for (auto& fr : feedFrames)
+        {
+            int cutIdx2 = codeToPair(fr.second);
+            if (cutIdx2 < 1 || cutIdx2 > 7) continue;
+
+            auto it0 = port0.find(fr.first);
+            auto it1 = port1.find(fr.first);
+            GNSSData frame = buildGnssData(
+                it0 != port0.end() ? it0->second : std::vector<SatelliteData>(),
+                it1 != port1.end() ? it1->second : std::vector<SatelliteData>());
+
+            if (cutIdx2 == 1)
             {
-                SpoofingResult r;
-                GetResult_GN902(id, r);
-                gn902LogResult(logFp, roundIdx, r);
-                totalAlarmCount += r.i_Count;
-                roundIdx++;
+                // 校正刀：先喂（触发上一轮检测+测向），再结算上一轮结果
+                SetData_GN902(id, &frame, 1, 1);
+                if (inRound && (doaMask & 0xFC) == 0xFC)
+                {
+                    SpoofingResult r;
+                    GetResult_GN902(id, r);
+                    gn902LogResult(logFp, roundIdx, r);
+                    totalAlarmCount += r.i_Count;
+                    roundIdx++;
+                }
+                inRound = true;
+                doaMask = 0;
             }
-            inRound = true;
-            doaMask = 0;
+            else
+            {
+                SetData_GN902(id, &frame, 1, cutIdx2);
+                inRound = true;
+                doaMask |= (1 << cutIdx2);
+            }
         }
-        else
+
+        // 末尾完整轮：用一帧空校正触发上一轮检测+测向
+        if (inRound && (doaMask & 0xFC) == 0xFC)
         {
-            SetData_GN902(id, &frame, 1, cutIdx2);
-            inRound = true;
-            doaMask |= (1 << cutIdx2);
+            GNSSData dummyCal;
+            memset(&dummyCal, 0, sizeof(dummyCal));
+            SetData_GN902(id, &dummyCal, 1, 1);
+            SpoofingResult r;
+            GetResult_GN902(id, r);
+            gn902LogResult(logFp, roundIdx, r);
+            totalAlarmCount += r.i_Count;
+            roundIdx++;
         }
-    }
 
-    // 末尾完整轮：用一帧空校正触发上一轮检测+测向
-    if (inRound && (doaMask & 0xFC) == 0xFC)
-    {
-        GNSSData dummyCal;
-        memset(&dummyCal, 0, sizeof(dummyCal));
-        SetData_GN902(id, &dummyCal, 1, 1);
-        SpoofingResult r;
-        GetResult_GN902(id, r);
-        gn902LogResult(logFp, roundIdx, r);
-        totalAlarmCount += r.i_Count;
-        roundIdx++;
+        // ---- 9. 汇总 ----
+        gn902LogLine(logFp, "\n================================================================\n");
+        gn902LogLine(logFp, "GN902 检测完成: 处理 %d 个完整测向轮, 共 %d 个报警频点\n", roundIdx, totalAlarmCount);
+        gn902LogLine(logFp, "================================================================\n");
     }
-
-    // ---- 9. 汇总 ----
-    gn902LogLine(logFp, "\n================================================================\n");
-    gn902LogLine(logFp, "GN902 检测完成: 处理 %d 个完整测向轮, 共 %d 个报警频点\n", roundIdx, totalAlarmCount);
-    gn902LogLine(logFp, "================================================================\n");
 
     Release_GN902(id);
     if (logFp) fclose(logFp);
