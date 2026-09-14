@@ -82,7 +82,7 @@ namespace PublicSpace
 
     // ==================== 日志系统 ====================
     void LogCreat(const string path); // 创建日志文件
-    void Log(const char *format, ...); // 编写日志（支持可变参数格式化）
+    // void Log(const char *format, ...); // 编写日志（支持可变参数格式化）
 
     // ==================== 模板函数 ====================
 
