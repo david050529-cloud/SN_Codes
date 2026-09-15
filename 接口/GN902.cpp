@@ -512,13 +512,22 @@ void ArithmeticDoa::getVirtual(const double virMultiple, vector<vector<int>> &an
 
 void ArithmeticDoa::getVirtualTheory(const int antnnaNum, const std::vector<std::vector<double>> tp_theory, const double virMultiple, std::vector<std::vector<double>> &virtualTheory)
 {
-    int num = antnnaNum * 10 + antnnaNum;
+    int num = antnnaNum * 10 + antnnaNum;   // 例如 7*10+7=77
     int index = 0;
     virtualTheory.clear();
     virtualTheory.resize(360);
     for (int ang = 0; ang < 360; ang++)
     {
-        virtualTheory[ang].resize(num);
+        virtualTheory[ang].assign(num, 0.0);
+
+        // 1) 保留原始阵元列 0..antnnaNum-1, 否则原始基线 {1,2}..{1,7} 的理论差
+        //    会退化成 0-0=0, 与实测相位差矛盾, 污染相关峰、偏移角度。
+        for (int i = 0; i < antnnaNum; i++)
+        {
+            virtualTheory[ang][i] = tp_theory[ang][i];
+        }
+
+        // 2) 填充虚拟阵元列
         for (int i = 0; i < antnnaNum; i++)
         {
             for (int j = 0; j < antnnaNum; j++)
@@ -544,6 +553,9 @@ int ArithmeticDoa::getVirtualAntNum(const int ant1, const int ant2)
 void ArithmeticDoa::calSecondDoaByVirInterf(const vector<vector<double>> phaseTheory, const double virMultiple, vector<double> diff, InterferInfo data, double &angle, double &quality)
 {
     // 步骤1: 伪谱预处理, 滤除低相关噪声(相关度<90视为噪声)
+    // 保存原始伪谱副本: 置零后的伪谱只用于寻峰, 质量评估必须用原始副本,
+    // 否则错误第二峰质量会虚高并越过 m_Qulity_Threshold 进入报警。
+    vector<double> diffRaw = diff;
     for (int i = 0; i < (int)diff.size(); i++)
     {
         if (diff[i] < 90)
@@ -582,7 +594,11 @@ void ArithmeticDoa::calSecondDoaByVirInterf(const vector<vector<double>> phaseTh
     std::sort(diff_index.begin(), diff_index.end(), [&](int i, int j)
               { return cos_diff[i] < cos_diff[j]; });
 
-    int num = 3;
+    int num = 5;   // 原为3, 样本太少易受多径/噪声影响导致误翻转; 取4~6条更稳
+    if (num > size)
+    {
+        num = size;
+    }
     vector<vector<int>> antnna;
     antnna.resize(num);
     vector<double> phase_diff;
@@ -612,12 +628,18 @@ void ArithmeticDoa::calSecondDoaByVirInterf(const vector<vector<double>> phaseTh
     // 步骤6: 对比相关度, 确定最终角度
     double sum1 = 0.0;
     double sum2 = 0.0;
-    for (int i = 0; i < (int)antnna.size(); i++)
+    int nPair = (int)antnna.size();
+    for (int i = 0; i < nPair; i++)
     {
         sum1 = sum1 + cos(phase_diff[i] - tp_theory_diff3[i]);
         sum2 = sum2 + cos(phase_diff[i] - tp_theory_diff4[i]);
     }
-    if (sum1 < sum2) // 候选角度2(镜像)匹配更好, 修正为第二峰
+    PublicSpace::Log("SecondaryDoa: peak0=%d(%.1f), peak1=%d(%.1f), sum1=%.3f, sum2=%.3f, angleBefore=%.2f, qualityBefore=%.2f\n",
+                     index[0], vaules[0], index[1], vaules[1], sum1, sum2, angle, quality);
+    // 第二峰翻转须有显著裕量: 平均 cos 差 > 0.15 且 sum2 至少多出 3.0,
+    // 避免 0.94 倍率区分度弱时噪声把正确第一峰(如353°)误翻到镜像峰(如173°)。
+    double avgDiff = (nPair > 0) ? (sum2 - sum1) / nPair : 0.0;
+    if (avgDiff > 0.15 && (sum2 - sum1) > 3.0) // 候选角度2(镜像)匹配显著更好, 修正为第二峰
     {
         angle = index[1];
         // 步骤7: 用选定角度重新计算质量
@@ -627,7 +649,9 @@ void ArithmeticDoa::calSecondDoaByVirInterf(const vector<vector<double>> phaseTh
         }
         vector<double> tp_theory_Doa_diff;
         calPseudoByInterfer(phaseTheory, data, tp_theory_Doa_diff);
-        quality = getDoaMass(tp_theory_Doa_diff, diff);
+        // 用原始伪谱评估质量, 不能用置零后的伪谱
+        quality = getDoaMass(tp_theory_Doa_diff, diffRaw);
+        PublicSpace::Log("SecondaryDoa flipped: angleAfter=%.2f, qualityAfter=%.2f\n", angle, quality);
     }
 }
 
@@ -782,12 +806,15 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
         result.i_SatelliteAngle[count].i_Alarm = 1;
         vector<AlarmData> tp = it->second;
         vector<double> doas;
+        vector<double> qualities;
         doas.reserve(tp.size());
+        qualities.reserve(tp.size());
         for (unsigned int i = 0; i < tp.size(); i++)
         {
             doas.push_back(tp[i].i_Angle);
+            qualities.push_back(tp[i].i_Quality);
         }
-        angle = tp.empty() ? -1.0 : circularMeanDeg(doas);
+        angle = tp.empty() ? -1.0 : circularMeanDegWeighted(doas, qualities);
         if (angle < 0)
         {
             angle += 360.0;
@@ -995,7 +1022,7 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
             // (相位模糊/跳半周)时, 用虚拟阵列缩短等效基线, 在候选角度间二次判别。
             if (1 == m_Secondary_Doa_Flag)
             {
-                ArithmeticDoa::calSecondDoaByVirInterf(phaseTheory, m_Virtual_Multiple, pseudoValue, tp_info, angle, quality);
+                ArithmeticDoa::calSecondDoaByVirInterf(phaseTheory, m_Secondary_Virtual_Multiple, pseudoValue, tp_info, angle, quality);
             }
 
             if (quality < m_Qulity_Threshold)
@@ -1074,6 +1101,12 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
         ArithmeticDoa::getVirtual(m_Virtual_Multiple, tp_antnna, tp_diff);
     }
     int size = (int)tp_diff.size();
+    if (size > 200)
+    {
+        PublicSpace::Log("error: InterferInfo overflow, size=%d\n", size);
+        doaFlg = 0;
+        return;
+    }
     int prn = dataB.i_Prn;
     int typeInt = TypeInt(dataB.i_Sys, dataB.i_Type);
     m_Max_Snr[typeInt][prn] = maxSnr;
@@ -1285,15 +1318,15 @@ void SpoofingDoa::configVirtualDoa(bool secondaryDoa, bool virtualExpand, double
     if (virMultiple > 0)
     {
         m_Virtual_Multiple = virMultiple;
+        m_Secondary_Virtual_Multiple = virMultiple;
     }
-    if (m_Virtual_Flag != 0)
-    {
-        // 虚拟阵列扩展会改变理论模板维度, 需重建 m_Theory
-        m_Theory.clear();
-        initTheory();
-    }
-    PublicSpace::Log("configVirtualDoa: secondaryDoa=%d virtualExpand=%d virMultiple=%.4f\n",
-                     m_Secondary_Doa_Flag, m_Virtual_Flag, m_Virtual_Multiple);
+    // 虚拟参数(开关/倍率)变化时重建理论模板。无条件重建可同时覆盖
+    // "关闭虚拟扩展"时把虚拟模板还原为原始模板的情形——原实现只在开启时重建,
+    // 关闭后会残留虚拟维度的 m_Theory。
+    m_Theory.clear();
+    initTheory();
+    PublicSpace::Log("configVirtualDoa: secondaryDoa=%d virtualExpand=%d virMultiple=%.4f secondaryMultiple=%.4f\n",
+                     m_Secondary_Doa_Flag, m_Virtual_Flag, m_Virtual_Multiple, m_Secondary_Virtual_Multiple);
 }
 
 /**
@@ -2041,6 +2074,14 @@ void SpoofingDoa::initTheory(void){
         }
 
         m_Theory[typeInt] = theory;
+
+        if (1 == m_Virtual_Flag)
+        {
+            PublicSpace::Log("initTheory virtual: typeInt=%d, cols=%d, virMultiple=%.4f\n",
+                             typeInt, (int)theory[0].size(), m_Virtual_Multiple);
+            PublicSpace::Log("  original col0=%.4f, col1=%.4f, virtual col11=%.4f\n",
+                             theory[0][0], theory[0][1], theory[0][11]);
+        }
     }
 }
 
@@ -2095,6 +2136,31 @@ double SpoofingDoa::circularMeanDeg(const std::vector<double> &degs)
         double rad = d * PI / 180.0;
         s += sin(rad);
         c += cos(rad);
+    }
+    return atan2(s, c) * 180.0 / PI;
+}
+
+double SpoofingDoa::circularMeanDegWeighted(const std::vector<double> &degs, const std::vector<double> &weights)
+{
+    double s = 0.0;
+    double c = 0.0;
+    double wsum = 0.0;
+    size_t n = std::min(degs.size(), weights.size());
+    for (size_t i = 0; i < n; ++i)
+    {
+        double rad = degs[i] * PI / 180.0;
+        double w = weights[i];
+        if (w < 0.0)
+        {
+            w = 0.0;
+        }
+        s += w * sin(rad);
+        c += w * cos(rad);
+        wsum += w;
+    }
+    if (wsum <= 0.0)
+    {
+        return circularMeanDeg(degs);
     }
     return atan2(s, c) * 180.0 / PI;
 }

@@ -530,6 +530,7 @@ private:
     // ---- 角度工具（静态，对应 Python detection_lib 的角度函数）----
     static double normalizeAngle180(double deg);
     static double circularMeanDeg(const std::vector<double> &degs);
+    static double circularMeanDegWeighted(const std::vector<double> &degs, const std::vector<double> &weights);
     static double circularSpanDeg(const std::vector<double> &degs);
     static double circularSpan180Deg(const std::vector<double> &degs);
 
@@ -644,8 +645,11 @@ protected:
     /// 是否启用虚拟阵列扩展(扩大等效孔径): 0=否, 1=是。
     int m_Virtual_Flag = 0;
 
-    /// 虚拟阵列扩展倍数(默认 0.94, <1 缩短基线解模糊)。
-    double m_Virtual_Multiple = 0.94;
+    /// 虚拟阵列扩展倍数(扩孔径用, 默认 1.00; <1 缩短基线, >1 扩大孔径)。
+    double m_Virtual_Multiple = 1.00;
+
+    /// 虚拟干涉仪二次测向专用虚拟倍率(解相位模糊, 建议 0.5~0.7, 明显小于1)。
+    double m_Secondary_Virtual_Multiple = 0.60;
 };
 
 
