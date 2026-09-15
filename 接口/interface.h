@@ -144,8 +144,9 @@ EXTERN_C int SetElevationVec_AS(int id, double* elevations, int eleLen);
 // 卫导版本
 // SF 欺骗
 EXTERN_C int Create_GN902(int &id);
-EXTERN_C int SetThresholdDetection_GN902(int id, double phsDiffThreshold, double satelliteCountThreshold, 
+EXTERN_C int SetThresholdDetection_GN902(int id, double phsDiffThreshold, double satelliteCountThreshold,
             double cutCountThreshold, int sysEnum, int typeEnum);
+EXTERN_C int SetVirtualDoa_GN902(int id, int secondaryDoa, int virtualExpand, double virMultiple);
 // 一秒传入一次数据，cutIdx_1 通道1天线索引，cutIdx_2 通道2天线索引
 // 天线对 {8,9} 或 {9,8} 为固定基线采集模式：不参与循环切刀、不进入测向，
 // 仅逐星采集两端口载波相位差并写入日志文件(./gn902_phasediff.log)。

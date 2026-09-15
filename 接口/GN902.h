@@ -276,6 +276,44 @@ protected:
      */
     double getDoaMass(const vector<double> diffTheory, const vector<double> diff);
 
+    /*==================虚拟阵列扩展（Virtual Array）==================*/
+
+    /**
+     * @brief 根据虚拟倍率扩展虚拟阵元及其相位差
+     * @param virMultiple 虚拟倍率, 实际相位差乘以该倍率得到虚拟相位差
+     * @param antnna     输入/输出的天线对列表, 输入为原始天线对, 输出包含原始+虚拟天线对
+     * @param phase_diff 输入/输出的相位差数组, 与 antnna 同步更新
+     */
+    void getVirtual(const double virMultiple, vector<vector<int>> &antnna, vector<double> &phase_diff);
+
+    /**
+     * @brief 根据虚拟倍率扩展理论相位矩阵, 生成虚拟阵元的理论相位
+     * @param antnnaNum    实际天线数量
+     * @param tp_theory    原始理论相位矩阵
+     * @param virMultiple  虚拟倍率
+     * @param virtualTheory 输出的虚拟理论相位矩阵, 列数为 antnnaNum*10 + antnnaNum
+     */
+    void getVirtualTheory(const int antnnaNum, const std::vector<std::vector<double>> tp_theory, const double virMultiple, std::vector<std::vector<double>> &virtualTheory);
+
+    /**
+     * @brief 生成虚拟阵元的编号 (编码规则: ant1*10 + ant2)
+     * @param ant1 第一天线编号(从 1 开始)
+     * @param ant2 第二天线编号(从 1 开始)
+     * @return 虚拟阵元编号, 用作虚拟理论相位矩阵的列索引
+     */
+    int getVirtualAntNum(const int ant1, const int ant2);
+
+    /**
+     * @brief 利用相关干涉仪 + 虚拟阵元进行二次测向, 解决相位模糊("跳半周")问题
+     * @param phaseTheory 理论相位矩阵
+     * @param virMultiple 虚拟倍率(通常 < 1, 用于缩短等效基线消除模糊)
+     * @param diff        第一次测向得到的伪谱数组(360 点)
+     * @param data        实测数据(天线对和相位差信息)
+     * @param angle       输出的最终测向角度(度)
+     * @param quality     输出的测向质量(0-100)
+     */
+    void calSecondDoaByVirInterf(const vector<vector<double>> phaseTheory, const double virMultiple, vector<double> diff, InterferInfo data, double &angle, double &quality);
+
 };
 
 
@@ -442,6 +480,14 @@ public:
      */
     void configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR);
 
+    /**
+     * @brief 配置虚拟阵元测向
+     * @param secondaryDoa   是否启用虚拟干涉仪二次测向(解相位模糊)
+     * @param virtualExpand  是否启用虚拟阵列扩展(扩大等效孔径, 需同步重建理论模板)
+     * @param virMultiple    虚拟倍率(>0 时生效; <1 缩短基线解模糊, >1 扩大孔径)
+     */
+    void configVirtualDoa(bool secondaryDoa, bool virtualExpand, double virMultiple);
+
 private:
     // ---- PreparationData.cpp: 数据预处理 ----
     void getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA, bool snrFilter = true);
@@ -591,6 +637,15 @@ protected:
     /// 切刀(天线对)序列: 每项 {通道1天线, 通道2天线}; 两值相等表示校正刀(不参与测向)。
     /// 顺序对齐 Python CODE_TO_PAIR: 校正 {1,1} + 六测向刀 {1,2}..{1,7}。
     vector<vector<int>> m_cutSequence = {{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}};
+
+    /// 是否启用虚拟干涉仪二次测向(解相位模糊): 0=否, 1=是。
+    int m_Secondary_Doa_Flag = 0;
+
+    /// 是否启用虚拟阵列扩展(扩大等效孔径): 0=否, 1=是。
+    int m_Virtual_Flag = 0;
+
+    /// 虚拟阵列扩展倍数(默认 0.94, <1 缩短基线解模糊)。
+    double m_Virtual_Multiple = 0.94;
 };
 
 
@@ -614,6 +669,14 @@ public:
      * @param typeEnum                频点编码
      */
     void SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, double cutCountThreshold, int sysEnum, int typeEnum);
+
+    /**
+     * @brief 配置虚拟阵元测向
+     * @param secondaryDoa  是否启用虚拟干涉仪二次测向(解相位模糊)
+     * @param virtualExpand 是否启用虚拟阵列扩展(扩大等效孔径)
+     * @param virMultiple   虚拟倍率(<1 缩短基线解模糊, >1 扩大孔径)
+     */
+    void SetVirtualDoa(bool secondaryDoa, bool virtualExpand, double virMultiple);
 
     /**
      * @brief 流式喂入一帧数据

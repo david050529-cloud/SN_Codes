@@ -4185,6 +4185,10 @@ int main141(json jsonData){
 //   可选阈值覆盖（不设则用引擎默认，与 Python 硬编码阈值一致）:
 //   "phsDiffThreshold" / "satelliteCountThreshold" / "cutCountThreshold" /
 //   "sysEnum" / "typeEnum"
+//   可选虚拟阵元测向（不设则默认关闭，与引擎默认一致）:
+//   "virtualSecondaryDoa" : 虚拟干涉仪二次测向(解相位模糊), true/false
+//   "virtualExpand"       : 虚拟阵列扩孔径, true/false
+//   "virtualMultiple"     : 虚拟倍率(默认 0.94, <1 缩短基线解模糊, >1 扩大孔径)
 // =============================================================================
 
 // 同时输出到命令行与日志文件
@@ -4364,6 +4368,17 @@ int main902(json jsonData)
         int type = jsonData.count("typeEnum") ? jsonData["typeEnum"].get<int>() : -1;
         ret = SetThresholdDetection_GN902(id, phsTh, satTh, cutTh, sys, type);
         if (ret != 0) gn902LogLine(logFp, "[GN902] SetThresholdDetection_GN902 失败 ret=%d\n", ret);
+    }
+
+    // 虚拟阵元测向配置（可选，不设则默认关闭，与引擎默认一致）
+    {
+        bool secondaryDoa  = jsonData.count("virtualSecondaryDoa") ? jsonData["virtualSecondaryDoa"].get<bool>() : false;
+        bool virtualExpand = jsonData.count("virtualExpand")       ? jsonData["virtualExpand"].get<bool>()       : false;
+        double virMultiple = jsonData.count("virtualMultiple")     ? jsonData["virtualMultiple"].get<double>()  : 0.94;
+        ret = SetVirtualDoa_GN902(id, secondaryDoa ? 1 : 0, virtualExpand ? 1 : 0, virMultiple);
+        if (ret != 0) gn902LogLine(logFp, "[GN902] SetVirtualDoa_GN902 失败 ret=%d\n", ret);
+        else gn902LogLine(logFp, "[GN902] 虚拟阵元测向: 二次测向=%d 扩孔径=%d 倍率=%.4f\n",
+                          secondaryDoa ? 1 : 0, virtualExpand ? 1 : 0, virMultiple);
     }
 
     // ---- 8. 流式喂入 ----

@@ -417,6 +417,222 @@ double ArithmeticDoa::getDoaMass(const vector<double> diffTheory, const vector<d
 
 
 // =============================================================================
+// == 原 arithmetic.cpp —— 虚拟阵列扩展(Virtual Array)实现 ==========================
+// =============================================================================
+// 虚拟阵列扩展原理: 将实测相位差按虚拟倍率 virMultiple 缩放, 生成等效"虚拟阵元"及
+// 对应相位差, 在不增加物理天线的前提下改变等效基线长度:
+//   - virMultiple < 1: 缩短等效基线, 用于消除大孔径阵列的相位模糊("跳半周")。
+//   - virMultiple > 1: 扩大等效孔径, 用于提高角度分辨率。
+// 虚拟阵元编号编码规则: getVirtualAntNum(ant1, ant2) = ant1*10 + ant2。
+// =============================================================================
+
+// 一维峰值检测(供 calSecondDoaByVirInterf 使用): 返回局部极大值索引与数值, 按数值降序排列。
+static void findPeaks(const std::vector<double> data, vector<int> &index2, vector<double> &vaules2)
+{
+    if (data.empty())
+    {
+        return;
+    }
+    int tp = -1;
+    vector<int> tp_index;
+    vector<int> index;
+    vector<double> vaules;
+    for (size_t i = 1; i < data.size() - 1; ++i)
+    {
+        if (data[i] > data[i - 1] && data[i] > data[i + 1])
+        {
+            index.emplace_back((int)i);
+            vaules.emplace_back(data[i]);
+            tp = tp + 1;
+            tp_index.emplace_back(tp);
+        }
+    }
+    if (data.size() > 1 && (data[0] > data[1]) && (data[0] > data[data.size() - 1]))
+    {
+        index.emplace_back(0);
+        vaules.emplace_back(data[0]);
+        tp = tp + 1;
+        tp_index.emplace_back(tp);
+    }
+    if (data.size() > 1 && (data[data.size() - 1] > data[data.size() - 2]) && (data[data.size() - 1] > data[0]))
+    {
+        index.emplace_back((int)data.size() - 1);
+        vaules.emplace_back(data[data.size() - 1]);
+        tp = tp + 1;
+        tp_index.emplace_back(tp);
+    }
+    std::sort(tp_index.begin(), tp_index.end(), [&](int i, int j)
+              { return vaules[i] > vaules[j]; });
+
+    index2.clear();
+    vaules2.clear();
+    int num = (int)tp_index.size();
+    index2.resize(num);
+    vaules2.resize(num);
+    for (int i = 0; i < num; i++)
+    {
+        index2[i] = index[tp_index[i]];
+        vaules2[i] = vaules[tp_index[i]];
+    }
+}
+
+void ArithmeticDoa::getVirtual(const double virMultiple, vector<vector<int>> &antnna, vector<double> &phase_diff)
+{
+    vector<vector<int>> tp_antnna = antnna;
+    vector<double> tp_diff = phase_diff;
+    int count = (int)tp_antnna.size(); // 只遍历原始天线对, 避免无限扩展
+    int virtualAnt = 0;
+    double virtualDiff = 0.0;
+    vector<int> tp;
+    tp.resize(2);
+    for (int i = 0; i < count; i++)
+    {
+        // 正向扩展: 以第二个天线为基准向第一个天线方向外推
+        virtualAnt = getVirtualAntNum(tp_antnna[i][0], tp_antnna[i][1]);
+        virtualDiff = tp_diff[i] * virMultiple;
+        tp[0] = tp_antnna[i][1];
+        tp[1] = virtualAnt;
+        tp_antnna.emplace_back(tp);
+        tp_diff.emplace_back(virtualDiff);
+
+        // 反向扩展: 对称方向的外推
+        virtualAnt = getVirtualAntNum(tp_antnna[i][1], tp_antnna[i][0]);
+        virtualDiff = -tp_diff[i] * virMultiple;
+        tp[0] = tp_antnna[i][0];
+        tp[1] = virtualAnt;
+        tp_antnna.emplace_back(tp);
+        tp_diff.emplace_back(virtualDiff);
+    }
+
+    antnna.clear();
+    phase_diff.clear();
+    antnna = tp_antnna;
+    phase_diff = tp_diff;
+}
+
+void ArithmeticDoa::getVirtualTheory(const int antnnaNum, const std::vector<std::vector<double>> tp_theory, const double virMultiple, std::vector<std::vector<double>> &virtualTheory)
+{
+    int num = antnnaNum * 10 + antnnaNum;
+    int index = 0;
+    virtualTheory.clear();
+    virtualTheory.resize(360);
+    for (int ang = 0; ang < 360; ang++)
+    {
+        virtualTheory[ang].resize(num);
+        for (int i = 0; i < antnnaNum; i++)
+        {
+            for (int j = 0; j < antnnaNum; j++)
+            {
+                if (i == j)
+                {
+                    continue;
+                }
+                index = getVirtualAntNum(i + 1, j + 1) - 1;
+                double tp_diff = virMultiple * (tp_theory[ang][i] - tp_theory[ang][j]);
+                double tp_diff2 = tp_theory[ang][j] - tp_diff;
+                virtualTheory[ang][index] = tp_diff2;
+            }
+        }
+    }
+}
+
+int ArithmeticDoa::getVirtualAntNum(const int ant1, const int ant2)
+{
+    return ant1 * 10 + ant2;
+}
+
+void ArithmeticDoa::calSecondDoaByVirInterf(const vector<vector<double>> phaseTheory, const double virMultiple, vector<double> diff, InterferInfo data, double &angle, double &quality)
+{
+    // 步骤1: 伪谱预处理, 滤除低相关噪声(相关度<90视为噪声)
+    for (int i = 0; i < (int)diff.size(); i++)
+    {
+        if (diff[i] < 90)
+        {
+            diff[i] = 0.0;
+        }
+    }
+    // 步骤2: 寻峰
+    vector<int> index;
+    vector<double> vaules;
+    findPeaks(diff, index, vaules);
+    if (index.empty() || index.size() == 1)
+    {
+        return; // 无峰或单峰, 无模糊, 沿用第一次测向结果
+    }
+
+    int size = data.i_Phase_Len;
+    vector<double> cos_diff;
+    vector<int> diff_index;
+    cos_diff.resize(size);
+    diff_index.resize(size);
+    vector<double> tp_theory_diff1;
+    vector<double> tp_theory_diff2;
+    tp_theory_diff1.resize(size);
+    tp_theory_diff2.resize(size);
+
+    // 步骤3: 计算两个候选角度下的理论相位差与区分度
+    for (int j = 0; j < size; j++)
+    {
+        tp_theory_diff1[j] = phaseTheory[index[0]][data.i_AntennaSq[j][0] - 1] - phaseTheory[index[0]][data.i_AntennaSq[j][1] - 1];
+        tp_theory_diff2[j] = phaseTheory[index[1]][data.i_AntennaSq[j][0] - 1] - phaseTheory[index[1]][data.i_AntennaSq[j][1] - 1];
+        cos_diff[j] = cos(tp_theory_diff1[j] - tp_theory_diff2[j]); // cos 越小区分度越强
+        diff_index[j] = j;
+    }
+    // 步骤4: 选择区分度最强的 num 个天线对作为鉴别基
+    std::sort(diff_index.begin(), diff_index.end(), [&](int i, int j)
+              { return cos_diff[i] < cos_diff[j]; });
+
+    int num = 3;
+    vector<vector<int>> antnna;
+    antnna.resize(num);
+    vector<double> phase_diff;
+    phase_diff.resize(num);
+    vector<double> tp_theory_diff3;
+    vector<double> tp_theory_diff4;
+    tp_theory_diff3.resize(num);
+    tp_theory_diff4.resize(num);
+    for (int i = 0; i < num; i++)
+    {
+        antnna[i].resize(2);
+        antnna[i][0] = data.i_AntennaSq[diff_index[i]][0];
+        antnna[i][1] = data.i_AntennaSq[diff_index[i]][1];
+        phase_diff[i] = data.i_Phase_Diff[diff_index[i]];
+        tp_theory_diff3[i] = tp_theory_diff1[diff_index[i]];
+        tp_theory_diff4[i] = tp_theory_diff2[diff_index[i]];
+    }
+    // 步骤5: 三次虚拟阵列扩展
+    vector<vector<int>> antnna1;
+    vector<vector<int>> antnna2;
+    antnna1 = antnna;
+    antnna2 = antnna;
+    getVirtual(virMultiple, antnna, phase_diff);
+    getVirtual(virMultiple, antnna1, tp_theory_diff3);
+    getVirtual(virMultiple, antnna2, tp_theory_diff4);
+
+    // 步骤6: 对比相关度, 确定最终角度
+    double sum1 = 0.0;
+    double sum2 = 0.0;
+    for (int i = 0; i < (int)antnna.size(); i++)
+    {
+        sum1 = sum1 + cos(phase_diff[i] - tp_theory_diff3[i]);
+        sum2 = sum2 + cos(phase_diff[i] - tp_theory_diff4[i]);
+    }
+    if (sum1 < sum2) // 候选角度2(镜像)匹配更好, 修正为第二峰
+    {
+        angle = index[1];
+        // 步骤7: 用选定角度重新计算质量
+        for (int j = 0; j < size; j++)
+        {
+            data.i_Phase_Diff[j] = tp_theory_diff2[j];
+        }
+        vector<double> tp_theory_Doa_diff;
+        calPseudoByInterfer(phaseTheory, data, tp_theory_Doa_diff);
+        quality = getDoaMass(tp_theory_Doa_diff, diff);
+    }
+}
+
+
+// =============================================================================
 // == 原 SpoofingDoa.cpp —— 核心引擎实现 =================================================
 // =============================================================================
 
@@ -775,6 +991,13 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
             }
             PublicSpace::Log("]\n");
 
+            // 虚拟阵元二次测向(可选, m_Secondary_Doa_Flag=1): 当伪谱存在多个峰值
+            // (相位模糊/跳半周)时, 用虚拟阵列缩短等效基线, 在候选角度间二次判别。
+            if (1 == m_Secondary_Doa_Flag)
+            {
+                ArithmeticDoa::calSecondDoaByVirInterf(phaseTheory, m_Virtual_Multiple, pseudoValue, tp_info, angle, quality);
+            }
+
             if (quality < m_Qulity_Threshold)
             {
                 continue;
@@ -844,6 +1067,12 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
     // 与 Python correlative_doa 对齐: 仅使用 6 条测向基线(参考天线1 到 天线2..7)，
     // 不做 setUseAntennaAndPhaseAll 天线对传递扩展。扩展会引入半周歧义(180° 翻转)，
     // 使同一卫星在不同测向轮之间角度来回跳变(如 352°↔172°)。
+    // 虚拟阵列扩展(可选, m_Virtual_Flag=1): 构造虚拟阵元扩大等效孔径; 开启时需
+    // initTheory 同步使用 getVirtualTheory 扩展理论模板, 否则虚拟天线编号会越界。
+    if (1 == m_Virtual_Flag)
+    {
+        ArithmeticDoa::getVirtual(m_Virtual_Multiple, tp_antnna, tp_diff);
+    }
     int size = (int)tp_diff.size();
     int prn = dataB.i_Prn;
     int typeInt = TypeInt(dataB.i_Sys, dataB.i_Type);
@@ -1041,6 +1270,30 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
     }
     PublicSpace::Log("configCyclicRuntime: cyclic=%d oneCutFrams=%d smooth=%d omniR=%.4f\n",
                      m_Cyclic_Detection_Flag, m_OneCut_Frams, m_Smooth_Flag, m_omni_R);
+}
+
+/**
+ * @brief 配置虚拟阵元测向
+ * @param secondaryDoa   是否启用虚拟干涉仪二次测向(解相位模糊)
+ * @param virtualExpand  是否启用虚拟阵列扩展(扩大等效孔径, 需重建理论模板)
+ * @param virMultiple    虚拟倍率(>0 时生效)
+ */
+void SpoofingDoa::configVirtualDoa(bool secondaryDoa, bool virtualExpand, double virMultiple)
+{
+    m_Secondary_Doa_Flag = secondaryDoa ? 1 : 0;
+    m_Virtual_Flag = virtualExpand ? 1 : 0;
+    if (virMultiple > 0)
+    {
+        m_Virtual_Multiple = virMultiple;
+    }
+    if (m_Virtual_Flag != 0)
+    {
+        // 虚拟阵列扩展会改变理论模板维度, 需重建 m_Theory
+        m_Theory.clear();
+        initTheory();
+    }
+    PublicSpace::Log("configVirtualDoa: secondaryDoa=%d virtualExpand=%d virMultiple=%.4f\n",
+                     m_Secondary_Doa_Flag, m_Virtual_Flag, m_Virtual_Multiple);
 }
 
 /**
@@ -1770,13 +2023,22 @@ void SpoofingDoa::initTheory(void){
     double r = 0.0;
 
     vector<vector<double>> theory;
+    vector<vector<double>> tp_theory;
     for (auto it = m_F.begin(); it != m_F.end(); ++it)
     {
         theory.clear();
+        tp_theory.clear();
         typeInt = it->first;
         f = it->second;
         r = m_R[typeInt];
-        ArithmeticDoa::calPhaseTheory(f, r, m_AntennaNum, theory);
+        ArithmeticDoa::calPhaseTheory(f, r, m_AntennaNum, tp_theory);
+
+        theory = tp_theory;
+        // 虚拟阵列扩展: 启用时构造虚拟阵元理论相位, 增加相位差数据量(扩大等效孔径)
+        if (1 == m_Virtual_Flag)
+        {
+            ArithmeticDoa::getVirtualTheory(m_AntennaNum, tp_theory, m_Virtual_Multiple, theory);
+        }
 
         m_Theory[typeInt] = theory;
     }
@@ -2269,6 +2531,17 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     {
         eng->setDetectionRecordNum((int)cutCountThreshold);
     }
+    return;
+}
+
+// 配置虚拟阵元测向(转发到引擎 SpoofingDoa::configVirtualDoa)
+void GN902::SetVirtualDoa(bool secondaryDoa, bool virtualExpand, double virMultiple){
+    std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
+    if (it == g_gn902State.end() || it->second->eng == 0)
+    {
+        return;
+    }
+    it->second->eng->configVirtualDoa(secondaryDoa, virtualExpand, virMultiple);
     return;
 }
 
