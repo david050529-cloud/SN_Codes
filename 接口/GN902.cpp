@@ -1008,7 +1008,7 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
             double angle;
             double quality;
             ArithmeticDoa::calInterfer(phaseTheory, tp_info, angle, quality, pseudoValue);
-            PublicSpace::Log("Sys=%s,Type=%s,Prn=%d,Fre=%.1f,R=%.4f,startAngle=%d,endAngle=%d,angle=%.2f,quality=%.2f\n",
+            PublicSpace::Log("Sys=%s,Type=%s,Prn=%d,Fre=%.1f,R=%.4f,startAngle=%d,endAngle=%d,angle=%.5f,quality=%.5f\n",
                              GetSysName(typeInt / 100), GetTypeName(typeInt / 100, typeInt % 100), prn, m_F[typeInt], m_R[typeInt],
                              tp_info.i_Start, tp_info.i_End, angle, quality);
             PublicSpace::Log("antenna and phasediff:[\n");
@@ -2329,12 +2329,12 @@ void SpoofingDoa::LogSpoofingResult(const SpoofingResult result)
     PublicSpace::Log(" %s   Spoofing num = %d\n", nowT.c_str(), result.i_Count);
     for (int i = 0; i < result.i_Count; i++)
     {
-        PublicSpace::Log("Sys=%s,Type=%s,Count=%d,Angle=%.2f\n",
+        PublicSpace::Log("Sys=%s,Type=%s,Count=%d,Angle=%.5f\n",
                          GetSysName(result.i_SatelliteAngle[i].i_Sys), GetTypeName(result.i_SatelliteAngle[i].i_Sys, result.i_SatelliteAngle[i].i_Type), result.i_SatelliteAngle[i].i_Count, result.i_SatelliteAngle[i].i_Angle);
         PublicSpace::Log("{\n");
         for (int j = 0; j < result.i_SatelliteAngle[i].i_Count; j++)
         {
-            PublicSpace::Log("Prn=%d,Snr=%.1f,Angle=%.1f,Quality=%.2f;\n",
+            PublicSpace::Log("Prn=%d,Snr=%.1f,Angle=%.5f,Quality=%.5f;\n",
                              result.i_SatelliteAngle[i].i_AlarmData[j].i_Prn, result.i_SatelliteAngle[i].i_AlarmData[j].i_Snr, result.i_SatelliteAngle[i].i_AlarmData[j].i_Angle, result.i_SatelliteAngle[i].i_AlarmData[j].i_Quality);
         }
         PublicSpace::Log("}\n");

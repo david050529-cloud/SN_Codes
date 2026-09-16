@@ -4219,7 +4219,7 @@ static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
         for (int j = 0; j < sa.i_Count; ++j)
         {
             const AlarmData& ad = sa.i_AlarmData[j];
-            gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%.1f Quality=%.2f\n",
+            gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%.5f Quality=%.5f\n",
                          ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
         }
     }
