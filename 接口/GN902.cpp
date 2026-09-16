@@ -1000,7 +1000,9 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
-    std::set<int> roundAlarms; // 本轮任意测向刀报警的频点(对应 Python current_alarms)
+    // 频点 -> 本轮"连续报警尾段"中报警的切刀序号集合(本地，每轮重建)。报警中断时清空，
+    // 之后重新积累——保证基线只来自连续给出报警的刀，未给出报警的刀(含中断前的报警刀)不计入。
+    std::map<int, std::set<int>> trailingKnives;
 
     for (int j = 0; j < cutNum; ++j)
     {
@@ -1027,7 +1029,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
                     sids.insert(s.i_Prn);
                 }
                 cutAlarms[typeInt] = sids;
-                roundAlarms.insert(typeInt);
             }
         }
 
@@ -1036,10 +1037,8 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             if (cutAlarms.find(kv.first) == cutAlarms.end())
             {
                 kv.second = 0;
-                if (m_Tracking.find(kv.first) == m_Tracking.end())
-                {
-                    m_Baselines.erase(kv.first);
-                }
+                m_Baselines.erase(kv.first);
+                trailingKnives.erase(kv.first);
             }
         }
         for (auto &kv : cutAlarms)
@@ -1047,6 +1046,7 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             int typeInt = kv.first;
             int c = m_ConsecutiveAlarm[typeInt] + 1;
             m_ConsecutiveAlarm[typeInt] = c;
+            trailingKnives[typeInt].insert(j);
             if (c >= m_Detection_Recodds_Num)
             {
                 TrackingInfo &t = m_Tracking[typeInt];
@@ -1064,11 +1064,10 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
         for (auto &sat : dataA[j])
         {
             int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
-            // 与 Python 对齐: 基线累积针对 (current_alarms ∪ tracking) 频点的全部稳定卫星
-            // (而非仅 cluster_sats 或仅已跟踪频点)。current_alarms 即本轮任意测向刀报警的
-            // 频点(roundAlarms), 首次报警(连续=1)那一轮也要累积基线, 否则会漏掉该轮跨周期
-            // 相位差。测向候选星仍由 getCrossCycleDataB 限定为 cluster_sats, 不影响检测结果。
-            if (m_Tracking.find(typeInt) != m_Tracking.end() || roundAlarms.find(typeInt) != roundAlarms.end())
+            // 仅保留"连续报警尾段"中本刀报警频点的卫星(逐刀，对应 Python current_alarms)；
+            // 未给出报警的刀(含中断前的报警刀)不累计，避免用未报警刀的相位差补缺基线。
+            auto itt = trailingKnives.find(typeInt);
+            if (itt != trailingKnives.end() && itt->second.count(j))
             {
                 filtered.emplace_back(sat);
             }

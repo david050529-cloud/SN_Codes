@@ -534,7 +534,7 @@ private:
     };
     std::map<int, TrackingInfo> m_Tracking;      ///< 各频点欺骗跟踪状态
 
-    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;  ///< 跨周期累计的基线相位差(补缺刀用)
+    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;  ///< 跨周期累计的基线相位差(仅连续报警刀累计，中断即清空)
 
 protected:
     // =========================================================================
