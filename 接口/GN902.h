@@ -276,44 +276,6 @@ protected:
      */
     double getDoaMass(const vector<double> diffTheory, const vector<double> diff);
 
-    /*==================虚拟阵列扩展（Virtual Array）==================*/
-
-    /**
-     * @brief 根据虚拟倍率扩展虚拟阵元及其相位差
-     * @param virMultiple 虚拟倍率, 实际相位差乘以该倍率得到虚拟相位差
-     * @param antnna     输入/输出的天线对列表, 输入为原始天线对, 输出包含原始+虚拟天线对
-     * @param phase_diff 输入/输出的相位差数组, 与 antnna 同步更新
-     */
-    void getVirtual(const double virMultiple, vector<vector<int>> &antnna, vector<double> &phase_diff);
-
-    /**
-     * @brief 根据虚拟倍率扩展理论相位矩阵, 生成虚拟阵元的理论相位
-     * @param antnnaNum    实际天线数量
-     * @param tp_theory    原始理论相位矩阵
-     * @param virMultiple  虚拟倍率
-     * @param virtualTheory 输出的虚拟理论相位矩阵, 列数为 antnnaNum*10 + antnnaNum
-     */
-    void getVirtualTheory(const int antnnaNum, const std::vector<std::vector<double>> tp_theory, const double virMultiple, std::vector<std::vector<double>> &virtualTheory);
-
-    /**
-     * @brief 生成虚拟阵元的编号 (编码规则: ant1*10 + ant2)
-     * @param ant1 第一天线编号(从 1 开始)
-     * @param ant2 第二天线编号(从 1 开始)
-     * @return 虚拟阵元编号, 用作虚拟理论相位矩阵的列索引
-     */
-    int getVirtualAntNum(const int ant1, const int ant2);
-
-    /**
-     * @brief 利用相关干涉仪 + 虚拟阵元进行二次测向, 解决相位模糊("跳半周")问题
-     * @param phaseTheory 理论相位矩阵
-     * @param virMultiple 虚拟倍率(通常 < 1, 用于缩短等效基线消除模糊)
-     * @param diff        第一次测向得到的伪谱数组(360 点)
-     * @param data        实测数据(天线对和相位差信息)
-     * @param angle       输出的最终测向角度(度)
-     * @param quality     输出的测向质量(0-100)
-     */
-    void calSecondDoaByVirInterf(const vector<vector<double>> phaseTheory, const double virMultiple, vector<double> diff, InterferInfo data, double &angle, double &quality);
-
 };
 
 
@@ -369,23 +331,10 @@ struct SatelliteAngle
     AlarmData i_AlarmData[32]; // 最多32颗报警卫星详情
 };
 
-// 逐 code 检测明细(对应 Python detection_main 的"详细报警记录")：记录每一刀聚类判为
-// 欺骗的频点及其聚集卫星号，供逐 code 输出，避免只在测向轮聚合后输出导致报警信息偏少。
-struct DetectionRecord
-{
-    int i_Code;              // 切刀 code(9/57/17/25/33/1)
-    int i_Sys;               // 卫星系统编码
-    int i_Type;              // 频点编码
-    int i_Count;             // 聚集卫星数
-    int i_ClusterSats[32];   // 聚集卫星号列表
-};
-
 struct SpoofingResult
 {
     int i_Count;                          // 报警频点数
     SatelliteAngle i_SatelliteAngle[24];  // 最多24个频点的结果
-    int i_DetectionCount;                 // 逐 code 检测明细条数(本轮)
-    DetectionRecord i_Detection[256];     // 逐 code 检测明细
 };
 
 
@@ -493,14 +442,6 @@ public:
      */
     void configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR);
 
-    /**
-     * @brief 配置虚拟阵元测向
-     * @param secondaryDoa   是否启用虚拟干涉仪二次测向(解相位模糊)
-     * @param virtualExpand  是否启用虚拟阵列扩展(扩大等效孔径, 需同步重建理论模板)
-     * @param virMultiple    虚拟倍率(>0 时生效; <1 缩短基线解模糊, >1 扩大孔径)
-     */
-    void configVirtualDoa(bool secondaryDoa, bool virtualExpand, double virMultiple);
-
 private:
     // ---- PreparationData.cpp: 数据预处理 ----
     void getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA, bool snrFilter = true);
@@ -543,7 +484,6 @@ private:
     // ---- 角度工具（静态，对应 Python detection_lib 的角度函数）----
     static double normalizeAngle180(double deg);
     static double circularMeanDeg(const std::vector<double> &degs);
-    static double circularMeanDegWeighted(const std::vector<double> &degs, const std::vector<double> &weights);
     static double circularSpanDeg(const std::vector<double> &degs);
     static double circularSpan180Deg(const std::vector<double> &degs);
 
@@ -576,7 +516,6 @@ private:
     std::map<int, std::map<int, SatelliteDataPhaseDiffA>> m_CorrectionData;   ///< 通道校正相位差(按频点/PRN)
     std::map<int, std::vector<AlarmData>> m_AngleResultData;                  ///< 测向结果: 各频点报警卫星列表
     std::map<int, std::map<int, double>> m_Max_Snr;                           ///< 各频点各星最大信噪比
-    std::vector<DetectionRecord> m_DetectionRecords;                          ///< 本轮逐 code 检测明细(每轮 setDataAngle 重建)
 
     // =========================================================================
     // 循环切刀欺骗检测状态（对应 Python detection_lib.py）
@@ -595,7 +534,7 @@ private:
     };
     std::map<int, TrackingInfo> m_Tracking;      ///< 各频点欺骗跟踪状态
 
-    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;  ///< 跨周期累计的基线相位差(仅连续报警刀累计，中断即清空)
+    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;  ///< 跨周期累计的基线相位差(补缺刀用)
 
 protected:
     // =========================================================================
@@ -652,18 +591,6 @@ protected:
     /// 切刀(天线对)序列: 每项 {通道1天线, 通道2天线}; 两值相等表示校正刀(不参与测向)。
     /// 顺序对齐 Python CODE_TO_PAIR: 校正 {1,1} + 六测向刀 {1,2}..{1,7}。
     vector<vector<int>> m_cutSequence = {{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}};
-
-    /// 是否启用虚拟干涉仪二次测向(解相位模糊): 0=否, 1=是。
-    int m_Secondary_Doa_Flag = 0;
-
-    /// 是否启用虚拟阵列扩展(扩大等效孔径): 0=否, 1=是。
-    int m_Virtual_Flag = 0;
-
-    /// 虚拟阵列扩展倍数(扩孔径用, 默认 1.00; <1 缩短基线, >1 扩大孔径)。
-    double m_Virtual_Multiple = 1.00;
-
-    /// 虚拟干涉仪二次测向专用虚拟倍率(解相位模糊, 建议 0.5~0.7, 明显小于1)。
-    double m_Secondary_Virtual_Multiple = 0.60;
 };
 
 
@@ -687,14 +614,6 @@ public:
      * @param typeEnum                频点编码
      */
     void SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, double cutCountThreshold, int sysEnum, int typeEnum);
-
-    /**
-     * @brief 配置虚拟阵元测向
-     * @param secondaryDoa  是否启用虚拟干涉仪二次测向(解相位模糊)
-     * @param virtualExpand 是否启用虚拟阵列扩展(扩大等效孔径)
-     * @param virMultiple   虚拟倍率(<1 缩短基线解模糊, >1 扩大孔径)
-     */
-    void SetVirtualDoa(bool secondaryDoa, bool virtualExpand, double virMultiple);
 
     /**
      * @brief 流式喂入一帧数据

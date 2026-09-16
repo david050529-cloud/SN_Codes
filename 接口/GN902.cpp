@@ -15,36 +15,6 @@
 // =============================================================================
 #include "GN902.h"
 
-// =============================================================================
-// 模块级说明 —— 数据流与算法约定（重要）
-// =============================================================================
-//
-// 【切刀(天线对)循环】
-//   一轮 = 1 个校正刀 + 6 个测向刀，共 7 刀：
-//     校正刀 {1,1}：两端口接同一根天线，测的是通道间固定相位差，用于"通道校正"。
-//     测向刀 {1,2}..{1,7}：通道1固定接参考天线1，通道2依次切换到天线2..7，
-//                          用于相位差检测(聚类)与相关干涉仪测向(DOA)。
-//   切刀序列由 m_cutSequence 表示，顺序对齐 Python 的 CODE_TO_PAIR:
-//     code 0→{1,1}(校正), 9→{1,2}, 57→{1,3}, 17→{1,4}, 25→{1,5}, 33→{1,6}, 1→{1,7}。
-//
-// 【相位差符号约定】
-//   本模块 i_phase_diff = frac(PortOne.Phase − PortTwo.Phase)，单位"周"，归一化到 [0,1)。
-//   与 Python detection_lib 的 phase_diff = (port2 − port1) mod 360° 符号相反，
-//   但本模块内部"数据生成 / 校正偏移 / DOA 理论模板"三者统一用 port1−port2 约定，
-//   符号翻转在相关干涉仪的 cos() 中互相抵消，最终测向角度与 Python 一致。
-//
-// 【一轮处理流水线】(SpoofingDoa::setDataAngle)
-//   1. getSatelliteDataPhaseDiffA   逐刀提取两端口同名卫星的载波相位差(周)。
-//   2. (可选)getSmoothData / getEndFramData  每刀多帧平滑或取末帧(每刀1帧时跳过)。
-//   3. setCorrectionData / getCorrectedGnssData  用校正刀算通道偏移并扣除。
-//   4. getCyclicDetectionData  逐刀按相位差聚类做欺骗检测 + 连续确认 + 跟踪；
-//                              并只保留"连续报警尾段"各报警刀频点的卫星供基线累积，
-//                              报警中断即清空基线并重新积累(未报警刀不计入)。
-//   5. accumulateBaselines + getCrossCycleDataB  跨周期累积每星测向基线(仅报警刀)，
-//                              某报警刀缺相位差时复用上一周期值补缺。
-//   6. getResultInterferDoa  相关干涉仪逐星测向，汇总报警角度。
-// =============================================================================
-
 using namespace std;
 
 // =============================================================================
@@ -418,246 +388,6 @@ double ArithmeticDoa::getDoaMass(const vector<double> diffTheory, const vector<d
 
 
 // =============================================================================
-// == 原 arithmetic.cpp —— 虚拟阵列扩展(Virtual Array)实现 ==========================
-// =============================================================================
-// 虚拟阵列扩展原理: 将实测相位差按虚拟倍率 virMultiple 缩放, 生成等效"虚拟阵元"及
-// 对应相位差, 在不增加物理天线的前提下改变等效基线长度:
-//   - virMultiple < 1: 缩短等效基线, 用于消除大孔径阵列的相位模糊("跳半周")。
-//   - virMultiple > 1: 扩大等效孔径, 用于提高角度分辨率。
-// 虚拟阵元编号编码规则: getVirtualAntNum(ant1, ant2) = ant1*10 + ant2。
-// =============================================================================
-
-// 一维峰值检测(供 calSecondDoaByVirInterf 使用): 返回局部极大值索引与数值, 按数值降序排列。
-static void findPeaks(const std::vector<double> data, vector<int> &index2, vector<double> &vaules2)
-{
-    if (data.empty())
-    {
-        return;
-    }
-    int tp = -1;
-    vector<int> tp_index;
-    vector<int> index;
-    vector<double> vaules;
-    for (size_t i = 1; i < data.size() - 1; ++i)
-    {
-        if (data[i] > data[i - 1] && data[i] > data[i + 1])
-        {
-            index.emplace_back((int)i);
-            vaules.emplace_back(data[i]);
-            tp = tp + 1;
-            tp_index.emplace_back(tp);
-        }
-    }
-    if (data.size() > 1 && (data[0] > data[1]) && (data[0] > data[data.size() - 1]))
-    {
-        index.emplace_back(0);
-        vaules.emplace_back(data[0]);
-        tp = tp + 1;
-        tp_index.emplace_back(tp);
-    }
-    if (data.size() > 1 && (data[data.size() - 1] > data[data.size() - 2]) && (data[data.size() - 1] > data[0]))
-    {
-        index.emplace_back((int)data.size() - 1);
-        vaules.emplace_back(data[data.size() - 1]);
-        tp = tp + 1;
-        tp_index.emplace_back(tp);
-    }
-    std::sort(tp_index.begin(), tp_index.end(), [&](int i, int j)
-              { return vaules[i] > vaules[j]; });
-
-    index2.clear();
-    vaules2.clear();
-    int num = (int)tp_index.size();
-    index2.resize(num);
-    vaules2.resize(num);
-    for (int i = 0; i < num; i++)
-    {
-        index2[i] = index[tp_index[i]];
-        vaules2[i] = vaules[tp_index[i]];
-    }
-}
-
-void ArithmeticDoa::getVirtual(const double virMultiple, vector<vector<int>> &antnna, vector<double> &phase_diff)
-{
-    vector<vector<int>> tp_antnna = antnna;
-    vector<double> tp_diff = phase_diff;
-    int count = (int)tp_antnna.size(); // 只遍历原始天线对, 避免无限扩展
-    int virtualAnt = 0;
-    double virtualDiff = 0.0;
-    vector<int> tp;
-    tp.resize(2);
-    for (int i = 0; i < count; i++)
-    {
-        // 正向扩展: 以第二个天线为基准向第一个天线方向外推
-        virtualAnt = getVirtualAntNum(tp_antnna[i][0], tp_antnna[i][1]);
-        virtualDiff = tp_diff[i] * virMultiple;
-        tp[0] = tp_antnna[i][1];
-        tp[1] = virtualAnt;
-        tp_antnna.emplace_back(tp);
-        tp_diff.emplace_back(virtualDiff);
-
-        // 反向扩展: 对称方向的外推
-        virtualAnt = getVirtualAntNum(tp_antnna[i][1], tp_antnna[i][0]);
-        virtualDiff = -tp_diff[i] * virMultiple;
-        tp[0] = tp_antnna[i][0];
-        tp[1] = virtualAnt;
-        tp_antnna.emplace_back(tp);
-        tp_diff.emplace_back(virtualDiff);
-    }
-
-    antnna.clear();
-    phase_diff.clear();
-    antnna = tp_antnna;
-    phase_diff = tp_diff;
-}
-
-void ArithmeticDoa::getVirtualTheory(const int antnnaNum, const std::vector<std::vector<double>> tp_theory, const double virMultiple, std::vector<std::vector<double>> &virtualTheory)
-{
-    int num = antnnaNum * 10 + antnnaNum;   // 例如 7*10+7=77
-    int index = 0;
-    virtualTheory.clear();
-    virtualTheory.resize(360);
-    for (int ang = 0; ang < 360; ang++)
-    {
-        virtualTheory[ang].assign(num, 0.0);
-
-        // 1) 保留原始阵元列 0..antnnaNum-1, 否则原始基线 {1,2}..{1,7} 的理论差
-        //    会退化成 0-0=0, 与实测相位差矛盾, 污染相关峰、偏移角度。
-        for (int i = 0; i < antnnaNum; i++)
-        {
-            virtualTheory[ang][i] = tp_theory[ang][i];
-        }
-
-        // 2) 填充虚拟阵元列
-        for (int i = 0; i < antnnaNum; i++)
-        {
-            for (int j = 0; j < antnnaNum; j++)
-            {
-                if (i == j)
-                {
-                    continue;
-                }
-                index = getVirtualAntNum(i + 1, j + 1) - 1;
-                double tp_diff = virMultiple * (tp_theory[ang][i] - tp_theory[ang][j]);
-                double tp_diff2 = tp_theory[ang][j] - tp_diff;
-                virtualTheory[ang][index] = tp_diff2;
-            }
-        }
-    }
-}
-
-int ArithmeticDoa::getVirtualAntNum(const int ant1, const int ant2)
-{
-    return ant1 * 10 + ant2;
-}
-
-void ArithmeticDoa::calSecondDoaByVirInterf(const vector<vector<double>> phaseTheory, const double virMultiple, vector<double> diff, InterferInfo data, double &angle, double &quality)
-{
-    // 步骤1: 伪谱预处理, 滤除低相关噪声(相关度<90视为噪声)
-    // 保存原始伪谱副本: 置零后的伪谱只用于寻峰, 质量评估必须用原始副本,
-    // 否则错误第二峰质量会虚高并越过 m_Qulity_Threshold 进入报警。
-    vector<double> diffRaw = diff;
-    for (int i = 0; i < (int)diff.size(); i++)
-    {
-        if (diff[i] < 90)
-        {
-            diff[i] = 0.0;
-        }
-    }
-    // 步骤2: 寻峰
-    vector<int> index;
-    vector<double> vaules;
-    findPeaks(diff, index, vaules);
-    if (index.empty() || index.size() == 1)
-    {
-        return; // 无峰或单峰, 无模糊, 沿用第一次测向结果
-    }
-
-    int size = data.i_Phase_Len;
-    vector<double> cos_diff;
-    vector<int> diff_index;
-    cos_diff.resize(size);
-    diff_index.resize(size);
-    vector<double> tp_theory_diff1;
-    vector<double> tp_theory_diff2;
-    tp_theory_diff1.resize(size);
-    tp_theory_diff2.resize(size);
-
-    // 步骤3: 计算两个候选角度下的理论相位差与区分度
-    for (int j = 0; j < size; j++)
-    {
-        tp_theory_diff1[j] = phaseTheory[index[0]][data.i_AntennaSq[j][0] - 1] - phaseTheory[index[0]][data.i_AntennaSq[j][1] - 1];
-        tp_theory_diff2[j] = phaseTheory[index[1]][data.i_AntennaSq[j][0] - 1] - phaseTheory[index[1]][data.i_AntennaSq[j][1] - 1];
-        cos_diff[j] = cos(tp_theory_diff1[j] - tp_theory_diff2[j]); // cos 越小区分度越强
-        diff_index[j] = j;
-    }
-    // 步骤4: 选择区分度最强的 num 个天线对作为鉴别基
-    std::sort(diff_index.begin(), diff_index.end(), [&](int i, int j)
-              { return cos_diff[i] < cos_diff[j]; });
-
-    int num = 5;   // 原为3, 样本太少易受多径/噪声影响导致误翻转; 取4~6条更稳
-    if (num > size)
-    {
-        num = size;
-    }
-    vector<vector<int>> antnna;
-    antnna.resize(num);
-    vector<double> phase_diff;
-    phase_diff.resize(num);
-    vector<double> tp_theory_diff3;
-    vector<double> tp_theory_diff4;
-    tp_theory_diff3.resize(num);
-    tp_theory_diff4.resize(num);
-    for (int i = 0; i < num; i++)
-    {
-        antnna[i].resize(2);
-        antnna[i][0] = data.i_AntennaSq[diff_index[i]][0];
-        antnna[i][1] = data.i_AntennaSq[diff_index[i]][1];
-        phase_diff[i] = data.i_Phase_Diff[diff_index[i]];
-        tp_theory_diff3[i] = tp_theory_diff1[diff_index[i]];
-        tp_theory_diff4[i] = tp_theory_diff2[diff_index[i]];
-    }
-    // 步骤5: 三次虚拟阵列扩展
-    vector<vector<int>> antnna1;
-    vector<vector<int>> antnna2;
-    antnna1 = antnna;
-    antnna2 = antnna;
-    getVirtual(virMultiple, antnna, phase_diff);
-    getVirtual(virMultiple, antnna1, tp_theory_diff3);
-    getVirtual(virMultiple, antnna2, tp_theory_diff4);
-
-    // 步骤6: 对比相关度, 确定最终角度
-    double sum1 = 0.0;
-    double sum2 = 0.0;
-    int nPair = (int)antnna.size();
-    for (int i = 0; i < nPair; i++)
-    {
-        sum1 = sum1 + cos(phase_diff[i] - tp_theory_diff3[i]);
-        sum2 = sum2 + cos(phase_diff[i] - tp_theory_diff4[i]);
-    }
-    PublicSpace::Log("SecondaryDoa: peak0=%d(%.1f), peak1=%d(%.1f), sum1=%.3f, sum2=%.3f, angleBefore=%.2f, qualityBefore=%.2f\n",
-                     index[0], vaules[0], index[1], vaules[1], sum1, sum2, angle, quality);
-    // 第二峰翻转须有显著裕量: 平均 cos 差 > 0.15 且 sum2 至少多出 3.0,
-    // 避免 0.94 倍率区分度弱时噪声把正确第一峰(如353°)误翻到镜像峰(如173°)。
-    double avgDiff = (nPair > 0) ? (sum2 - sum1) / nPair : 0.0;
-    if (avgDiff > 0.15 && (sum2 - sum1) > 3.0) // 候选角度2(镜像)匹配显著更好, 修正为第二峰
-    {
-        angle = index[1];
-        // 步骤7: 用选定角度重新计算质量
-        for (int j = 0; j < size; j++)
-        {
-            data.i_Phase_Diff[j] = tp_theory_diff2[j];
-        }
-        vector<double> tp_theory_Doa_diff;
-        calPseudoByInterfer(phaseTheory, data, tp_theory_Doa_diff);
-        // 用原始伪谱评估质量, 不能用置零后的伪谱
-        quality = getDoaMass(tp_theory_Doa_diff, diffRaw);
-        PublicSpace::Log("SecondaryDoa flipped: angleAfter=%.2f, qualityAfter=%.2f\n", angle, quality);
-    }
-}
-
-
-// =============================================================================
 // == 原 SpoofingDoa.cpp —— 核心引擎实现 =================================================
 // =============================================================================
 
@@ -671,15 +401,15 @@ SpoofingDoa::SpoofingDoa(void){
     setThresholdDetectionDoa(0, 2, 4, -1);    // GPS L5
     setThresholdDetectionDoa(1, 0, 2, 5.0);   // GLONASS G1
     setThresholdDetectionDoa(1, 1, 3, 5.0);   // GLONASS G2
-    setThresholdDetectionDoa(3, 2, 3, 5.0);   // Galileo E1C
-    setThresholdDetectionDoa(3, 12, 4, 5.0);  // Galileo E5a
-    setThresholdDetectionDoa(3, 17, 4, 5.0);  // Galileo E5b
+    setThresholdDetectionDoa(3, 2, 3, 3.6);   // Galileo E1C
+    setThresholdDetectionDoa(3, 12, 4, 3.6);  // Galileo E5a
+    setThresholdDetectionDoa(3, 17, 4, 3.6);  // Galileo E5b
     setThresholdDetectionDoa(4, 17, 3, -1);   // BDS B2I
     setThresholdDetectionDoa(4, 0, 3, -1);    // BDS B1I
     setThresholdDetectionDoa(4, 2, 3, -1);    // BDS B3I
     setThresholdDetectionDoa(4, 8, 2, -1);    // BDS B1C
     setThresholdDetectionDoa(4, 19, 3, -1);   // BDS B2b
-    setThresholdDetectionDoa(4, 34, 3, 5.0);  // BDS B1X
+    setThresholdDetectionDoa(4, 34, 3, 3.6);  // BDS B1X
 }
 
 /**
@@ -784,15 +514,6 @@ int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
     return 0;
 }
 
-/**
- * @brief 汇总最近一轮的报警结果: 每个报警频点输出欺骗来向角度(逐星圆周均值)与卫星明细
- *
- * 遍历 m_AngleResultData(各频点报警卫星列表)，对每个频点：
- *   - 把该频点各报警卫星的测向角做圆周均值(circularMeanDeg)，归一化到 [0,360) 作为来向角度；
- *   - 逐星填入 AlarmData(PRN/角度/质量)，并用 m_Max_Snr 覆盖其信噪比；
- *   - i_Alarm 恒为 1(报警)，i_Count 为该频点报警卫星数。
- * 注意来向角度是"报警卫星测向角的圆周均值"，若个别卫星因半周模糊偏 180°，会拉偏均值。
- */
 void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
 {
     int count = 0;
@@ -807,15 +528,12 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
         result.i_SatelliteAngle[count].i_Alarm = 1;
         vector<AlarmData> tp = it->second;
         vector<double> doas;
-        vector<double> qualities;
         doas.reserve(tp.size());
-        qualities.reserve(tp.size());
         for (unsigned int i = 0; i < tp.size(); i++)
         {
             doas.push_back(tp[i].i_Angle);
-            qualities.push_back(tp[i].i_Quality);
         }
-        angle = tp.empty() ? -1.0 : circularMeanDegWeighted(doas, qualities);
+        angle = tp.empty() ? -1.0 : circularMeanDeg(doas);
         if (angle < 0)
         {
             angle += 360.0;
@@ -831,18 +549,6 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
         ++count;
     }
     result.i_Count = count;
-
-    // 逐 code 检测明细复制到结果(供 main902 逐 code 打印)
-    int detCount = (int)m_DetectionRecords.size();
-    if (detCount > 256)
-    {
-        detCount = 256;
-    }
-    result.i_DetectionCount = detCount;
-    for (int i = 0; i < detCount; ++i)
-    {
-        result.i_Detection[i] = m_DetectionRecords[i];
-    }
 }
 
 /**
@@ -855,7 +561,6 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
 void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
 {
     string nowT = getNowTime();
-    m_DetectionRecords.clear();   // 每轮重建逐 code 检测明细
 
     PublicSpace::Log("cal phase diff cutNum:  %s \n", nowT.c_str());
     vector<vector<SatelliteDataPhaseDiffA>> dataA;
@@ -1021,8 +726,8 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
             double angle;
             double quality;
             ArithmeticDoa::calInterfer(phaseTheory, tp_info, angle, quality, pseudoValue);
-            PublicSpace::Log("Sys=%s,Type=%s,Prn=%d,Fre=%.1f,R=%.4f,startAngle=%d,endAngle=%d,angle=%.5f,quality=%.5f\n",
-                             GetSysName(typeInt / 100), GetTypeName(typeInt / 100, typeInt % 100), prn, m_F[typeInt], m_R[typeInt],
+            PublicSpace::Log("Sys=%d,Type=%d,Prn=%d,Fre=%.1f,R=%.4f,startAngle=%d,endAngle=%d,angle=%.2f,quality=%.2f\n",
+                             typeInt / 100, typeInt % 100, prn, m_F[typeInt], m_R[typeInt],
                              tp_info.i_Start, tp_info.i_End, angle, quality);
             PublicSpace::Log("antenna and phasediff:[\n");
             for (int i = 0; i < tp_info.i_Phase_Len; i++)
@@ -1031,13 +736,6 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
                                  tp_info.i_AntennaSq[i][0], tp_info.i_AntennaSq[i][1], tp_info.i_Phase_Diff[i] * 180 / PI);
             }
             PublicSpace::Log("]\n");
-
-            // 虚拟阵元二次测向(可选, m_Secondary_Doa_Flag=1): 当伪谱存在多个峰值
-            // (相位模糊/跳半周)时, 用虚拟阵列缩短等效基线, 在候选角度间二次判别。
-            if (1 == m_Secondary_Doa_Flag)
-            {
-                ArithmeticDoa::calSecondDoaByVirInterf(phaseTheory, m_Secondary_Virtual_Multiple, pseudoValue, tp_info, angle, quality);
-            }
 
             if (quality < m_Qulity_Threshold)
             {
@@ -1055,14 +753,6 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
 
 /**
  * @brief 从一条基线数据提取测向所需的天线对与相位差, 填入 InterferInfo
- *
- * 从 dataB 的 7 刀中跳过校正刀(j=0)，收集 6 条测向刀(天线对 {1,2}..{1,7})的有效相位差
- * (两端口信噪比都 >1e-6)。仅使用这 6 条基线，不做 setUseAntennaAndPhaseAll 的天线对传递
- * 扩展——扩展会引入半周歧义(180° 翻转)，使同一卫星在测向轮之间角度来回跳变(352°↔172°)。
- * 有效切刀数不足 m_Doa_Cut_min_Num(默认6)则 doaFlg=0，本轮该星不参与测向。
- * 顺带统计该星最大信噪比(取 6 条测向刀两端口中的最大值)写入 m_Max_Snr，供结果输出。
- * 相位差由"周"转"弧度"(×2π)后填入 InterferInfo.i_Phase_Diff(与理论模板单位一致)。
- *
  * @param dataB  单星各切刀相位差数据
  * @param info   输出: 测向输入信息(天线对/相位差/条数)
  * @param doaFlg 输出: 1=有效(切刀数足够), 0=无效(切刀数不足)
@@ -1108,19 +798,7 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
     // 与 Python correlative_doa 对齐: 仅使用 6 条测向基线(参考天线1 到 天线2..7)，
     // 不做 setUseAntennaAndPhaseAll 天线对传递扩展。扩展会引入半周歧义(180° 翻转)，
     // 使同一卫星在不同测向轮之间角度来回跳变(如 352°↔172°)。
-    // 虚拟阵列扩展(可选, m_Virtual_Flag=1): 构造虚拟阵元扩大等效孔径; 开启时需
-    // initTheory 同步使用 getVirtualTheory 扩展理论模板, 否则虚拟天线编号会越界。
-    if (1 == m_Virtual_Flag)
-    {
-        ArithmeticDoa::getVirtual(m_Virtual_Multiple, tp_antnna, tp_diff);
-    }
     int size = (int)tp_diff.size();
-    if (size > 200)
-    {
-        PublicSpace::Log("error: InterferInfo overflow, size=%d\n", size);
-        doaFlg = 0;
-        return;
-    }
     int prn = dataB.i_Prn;
     int typeInt = TypeInt(dataB.i_Sys, dataB.i_Type);
     m_Max_Snr[typeInt][prn] = maxSnr;
@@ -1267,7 +945,7 @@ void SpoofingDoa::setR(void){
  */
 void SpoofingDoa::setThresholdDetectionDoa(int sys, int type, int threshold, double phsThreshold)
 {
-    PublicSpace::Log("Sys=%s,Type=%s,coutThreshold=%i,phsThreshold=%.1f\n", GetSysName(sys), GetTypeName(sys, type), threshold, phsThreshold);
+    PublicSpace::Log("Sys=%i,Type=%i,coutThreshold=%i,phsThreshold=%.1f\n", sys, type, threshold, phsThreshold);
     if (-1 == sys && -1 == type)
     {
         initDetectionThreshold(threshold, phsThreshold);
@@ -1319,63 +997,10 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
                      m_Cyclic_Detection_Flag, m_OneCut_Frams, m_Smooth_Flag, m_omni_R);
 }
 
-/**
- * @brief 配置虚拟阵元测向
- * @param secondaryDoa   是否启用虚拟干涉仪二次测向(解相位模糊)
- * @param virtualExpand  是否启用虚拟阵列扩展(扩大等效孔径, 需重建理论模板)
- * @param virMultiple    虚拟倍率(>0 时生效)
- */
-void SpoofingDoa::configVirtualDoa(bool secondaryDoa, bool virtualExpand, double virMultiple)
-{
-    m_Secondary_Doa_Flag = secondaryDoa ? 1 : 0;
-    m_Virtual_Flag = virtualExpand ? 1 : 0;
-    if (virMultiple > 0)
-    {
-        m_Virtual_Multiple = virMultiple;
-        m_Secondary_Virtual_Multiple = virMultiple;
-    }
-    // 虚拟参数(开关/倍率)变化时重建理论模板。无条件重建可同时覆盖
-    // "关闭虚拟扩展"时把虚拟模板还原为原始模板的情形——原实现只在开启时重建,
-    // 关闭后会残留虚拟维度的 m_Theory。
-    m_Theory.clear();
-    initTheory();
-    PublicSpace::Log("configVirtualDoa: secondaryDoa=%d virtualExpand=%d virMultiple=%.4f secondaryMultiple=%.4f\n",
-                     m_Secondary_Doa_Flag, m_Virtual_Flag, m_Virtual_Multiple, m_Secondary_Virtual_Multiple);
-}
-
-/**
- * @brief 循环切刀欺骗检测 + 连续确认 + 跟踪 + 基线筛选
- *
- * 分两阶段（对齐 Python detection_main.py 的 finalize_switch）：
- *   第一阶段(逐刀)：对每个测向刀按频点聚类(calAlarmByPhaseDiff)判报警；维护各频点连续报警
- *   计数 m_ConsecutiveAlarm——本刀报警则 +1，连续达到 m_Detection_Recodds_Num 后把该刀报警
- *   卫星并入 m_Tracking 的 cluster_sats(欺骗卫星簇)；本刀未报警则清零，并**无条件**清空该
- *   频点的跨周期基线 m_Baselines（含已跟踪频点），之后重新积累；同时记录各频点"连续报警尾段"
- *   中报警的切刀序号集合(trailingKnives)。
- *   第二阶段(筛选)：只保留"连续报警尾段"中每把报警刀频点的卫星，供 accumulateBaselines 仅
- *   累计报警刀的基线。未给出报警的刀(含中断前的报警刀)不累计——对齐 Python 只从 current_alarms
- *   累计、报警中断即清空基线的行为，取代原先 (tracking ∪ roundAlarms) 的宽口径。
- *
- * @param dataA 各切刀逐星相位差(已校正)，本函数会原地筛选为"连续报警尾段"各报警刀频点的卫星
- */
-// 切刀序号(0=校正, 1..6=六测向刀) → Python OpenAntenna code
-// 校正 {1,1}→0, 测向 {1,2}→9, {1,3}→57, {1,4}→17, {1,5}→25, {1,6}→33, {1,7}→1
-static int cutIndexToCode(int j)
-{
-    static const int codeByIndex[7] = {0, 9, 57, 17, 25, 33, 1};
-    if (j < 0 || j >= 7)
-    {
-        return -1;
-    }
-    return codeByIndex[j];
-}
-
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
-    // 频点 -> 本轮"连续报警尾段"中报警的切刀序号集合(本地，每轮重建)。报警中断时清空，
-    // 之后重新积累——保证基线只来自连续给出报警的刀，未给出报警的刀(含中断前的报警刀)不计入。
-    std::map<int, std::set<int>> trailingKnives;
+    std::set<int> roundAlarms; // 本轮任意测向刀报警的频点(对应 Python current_alarms)
 
     for (int j = 0; j < cutNum; ++j)
     {
@@ -1402,27 +1027,8 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
                     sids.insert(s.i_Prn);
                 }
                 cutAlarms[typeInt] = sids;
+                roundAlarms.insert(typeInt);
             }
-        }
-
-        // 逐 code 检测明细：记录本刀聚类判为欺骗的频点及其聚集卫星(对应 Python 详细报警记录)
-        for (auto &kv : cutAlarms)
-        {
-            int typeInt = kv.first;
-            DetectionRecord rec;
-            rec.i_Code = cutIndexToCode(j);
-            rec.i_Sys = typeInt / 100;
-            rec.i_Type = typeInt % 100;
-            int n = (int)kv.second.size();
-            if (n > 32) n = 32;
-            rec.i_Count = n;
-            int k = 0;
-            for (int sid : kv.second)
-            {
-                if (k >= 32) break;
-                rec.i_ClusterSats[k++] = sid;
-            }
-            m_DetectionRecords.emplace_back(rec);
         }
 
         for (auto &kv : m_ConsecutiveAlarm)
@@ -1430,8 +1036,10 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             if (cutAlarms.find(kv.first) == cutAlarms.end())
             {
                 kv.second = 0;
-                m_Baselines.erase(kv.first);
-                trailingKnives.erase(kv.first);
+                if (m_Tracking.find(kv.first) == m_Tracking.end())
+                {
+                    m_Baselines.erase(kv.first);
+                }
             }
         }
         for (auto &kv : cutAlarms)
@@ -1439,7 +1047,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             int typeInt = kv.first;
             int c = m_ConsecutiveAlarm[typeInt] + 1;
             m_ConsecutiveAlarm[typeInt] = c;
-            trailingKnives[typeInt].insert(j);
             if (c >= m_Detection_Recodds_Num)
             {
                 TrackingInfo &t = m_Tracking[typeInt];
@@ -1457,10 +1064,11 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
         for (auto &sat : dataA[j])
         {
             int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
-            // 仅保留"连续报警尾段"中本刀报警频点的卫星(逐刀，对应 Python current_alarms)；
-            // 未给出报警的刀(含中断前的报警刀)不累计，避免用未报警刀的相位差补缺基线。
-            auto itt = trailingKnives.find(typeInt);
-            if (itt != trailingKnives.end() && itt->second.count(j))
+            // 与 Python 对齐: 基线累积针对 (current_alarms ∪ tracking) 频点的全部稳定卫星
+            // (而非仅 cluster_sats 或仅已跟踪频点)。current_alarms 即本轮任意测向刀报警的
+            // 频点(roundAlarms), 首次报警(连续=1)那一轮也要累积基线, 否则会漏掉该轮跨周期
+            // 相位差。测向候选星仍由 getCrossCycleDataB 限定为 cluster_sats, 不影响检测结果。
+            if (m_Tracking.find(typeInt) != m_Tracking.end() || roundAlarms.find(typeInt) != roundAlarms.end())
             {
                 filtered.emplace_back(sat);
             }
@@ -1469,18 +1077,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
     }
 }
 
-/**
- * @brief 跨周期累积每星各切刀的基线相位差(仅报警刀累计)
- *
- * 把本轮得到的每星相位差(dataB)写入 m_Baselines[typeInt][prn]：
- *   - 首次出现 → 整体存入；
- *   - 已存在 → 仅覆盖本轮信噪比有效的切刀位(有效位才更新)，其余切刀位保留上一周期的旧值。
- * 注意 dataB 已经过 getCyclicDetectionData 筛选，只含"连续报警尾段"各报警刀频点的卫星，
- * 因此这里只累计报警刀的基线；某报警刀某星缺相位差(如信噪比缺失)时才复用上一周期值补缺，
- * 未给出报警的刀不会被补进来。
- * 基线存的是"校正后"相位差；校正偏移每轮由校正刀重算，若偏移跨轮漂移，
- * 旧基线可能与新基线口径不一致(该行为与 Python 一致)。
- */
 void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB> &dataB)
 {
     for (const auto &b : dataB)
@@ -1508,14 +1104,6 @@ void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB>
     }
 }
 
-/**
- * @brief 从跨周期基线库中取出当前跟踪频点 cluster_sats 各星的基线数据(供测向)
- *
- * 测向候选星只取"被跟踪(cluster_sats)"的卫星，逐星从 m_Baselines 取已累积的基线
- * (可能混有上一周期补缺的刀位)，交给 getResultInterferDoa 测向。
- * 注意：哪些频点/卫星被写入 m_Baselines 由 getCyclicDetectionData 决定(连续报警尾段中的报警刀)，
- * 这里只做"取用"——不在 cluster_sats 里的卫星即便有基线也不会参与测向。
- */
 void SpoofingDoa::getCrossCycleDataB(std::vector<SatelliteDataPhaseDiffB> &doaDataB)
 {
     doaDataB.clear();
@@ -1646,21 +1234,10 @@ void SpoofingDoa::setDetectionRecordNum(int num)
 }
 
 /**
- * @brief 从单帧 GNSS 双通道数据提取逐星相位差(细粒度 SatelliteDataPhaseDiffA)
- *
- * 遍历 PortOne 中每个"未重复"的卫星(按 PRN/系统/频点去重)，在 PortTwo 中找同名卫星：
- *   - 匹配成功 → i_phase_diff = frac(PortOne.Phase − PortTwo.Phase)，单位"周"，归一化到 [0,1)。
- *     注意符号：这是 Port1−Port2，与 Python 的 port2−port1 相反(见文件头部"符号约定")；
- *     但"数据/校正/模板"三者统一该约定，相关干涉仪 cos() 中符号翻转互相抵消，测向角一致。
- *   - 匹配失败 → i_phase_diff = −1，标记"仅单端口出现"，后续被 getSatelliteDataPhaseDiffB
- *     按信噪比缺省剔除(仅此单端口存在，无有效相位差)。
- * 只处理 m_F 中登记过的频点；PortTwo 中剩余未匹配的卫星也以 i_phase_diff=−1 补入(补全另一端口)。
- *
- * @param data     单帧 GNSS 数据(Port1/Port2 两通道)
- * @param dataA    输出: 各卫星相位差/信噪比列表(按 PRN/系统/频点对齐)
- * @param snrFilter true=仅保留两端口信噪比都 ≥ m_Snr_Threshold 的卫星(测向刀);
- *                  false=不过滤(校正刀, 用全部匹配卫星算通道偏移, 与 Python compute_calibration 一致)
- * @note 载波相位差取小数部分(周)：整数周(整周期模糊度)在相关干涉仪中不贡献方向信息，直接丢弃。
+ * @brief 从单帧 GNSS 双通道数据提取逐星相位差
+ * @param data  单帧 GNSS 数据(Port1/Port2 两通道)
+ * @param dataA 输出: 各卫星的相位差、信噪比(按 PRN/系统/频点对齐)
+ * @note 取两通道同名卫星的载波相位差(取小数部分, 归一化到 [0,1) 周)
  */
 void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA, bool snrFilter)
 {
@@ -1722,13 +1299,10 @@ void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<Satell
 
                     double phs_tp = data.i_PortOne[i].i_Phase - data.i_PortTwo[j].i_Phase;
 
-                    // 用 fmod 精确取相位差的小数部分(周)，替代 (long long int) 截断相减：
-                    // fmod 按 IEEE754 计算 x - trunc(x)，无整数截断/回转型的舍入误差，
-                    // 对较大累积相位(整周数)更稳，提升用于测向的相位差精度。
-                    double diff = fmod(phs_tp, 1.0);
+                    double diff = phs_tp - (long long int)phs_tp;
                     if (diff < 0)
                     {
-                        diff += 1.0;
+                        diff = diff + 1;
                     }
                     tp.i_phase_diff = diff;
                     dataA.emplace_back(tp);
@@ -1891,22 +1465,6 @@ void SpoofingDoa::setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>
     calCorrectionOffset(calCuts);
 }
 
-/**
- * @brief 由校正刀数据计算各频点的通道校正偏移(相位差, 单位"周")
- *
- * 校正刀 {1,1} 两端口接同一根天线，因此同星相位差只反映两通道之间的固定相位偏移。
- * 对每颗"稳定"卫星(相位差最小覆盖弧 circularSpanDeg < STABILITY_RANGE_DEG 且采样数足够)
- * 取圆周均值作为该星的通道偏移；再对同频点各星偏移取圆周均值，得到该频点的统一校正偏移。
- *
- * 关键区别(与 Python compute_calibration 一致)：
- *   - GLONASS(sys==1) 为 FDMA，各卫星频率不同、通道偏移逐星而异 → 按 (频点, PRN) 逐星存偏移。
- *   - 其余系统(CDMA) → 同频点各星共用同一偏移，存于 key=−1(PRN 占位)。
- *
- * 注意校正刀不按信噪比过滤(见 setDataAngle 的 isCalCut 分支)，否则低信噪比卫星被剔除
- * 会使校正偏移整体漂移(可达上百度)，导致测向角度错位。
- *
- * @param calCuts 校正刀数据(每个校正刀一帧的逐星相位差列表)
- */
 void SpoofingDoa::calCorrectionOffset(const vector<vector<SatelliteDataPhaseDiffA>> &calCuts)
 {
     map<int, map<int, vector<double>>> samples;
@@ -2033,15 +1591,6 @@ void SpoofingDoa::getCorrectedGnssData(vector<vector<SatelliteDataPhaseDiffA>> &
     }
 }
 
-/**
- * @brief 对单颗卫星的相位差扣除通道校正偏移(单位: 周)
- *
- * 从 m_CorrectionData 取出该星对应偏移并相减：
- *   - GLONASS(sys==1)：按 PRN 取逐星偏移(FDMA，各星通道偏移不同)。
- *   - 其余系统：取频点统一偏移(key=−1)。
- * 无偏移记录或该星信噪比不完整(任一端口 <1e-3，视为无有效相位差)则不改动。
- * 校正后 i_phase_diff ≈ 纯几何相位差(天线1 与 天线k 之间的来波相位差)。
- */
 void SpoofingDoa::calCorrecteData(SatelliteDataPhaseDiffA &dataA)
 {
     int typeInt = TypeInt(dataA.i_Sys, dataA.i_Type);
@@ -2108,32 +1657,15 @@ void SpoofingDoa::initTheory(void){
     double r = 0.0;
 
     vector<vector<double>> theory;
-    vector<vector<double>> tp_theory;
     for (auto it = m_F.begin(); it != m_F.end(); ++it)
     {
         theory.clear();
-        tp_theory.clear();
         typeInt = it->first;
         f = it->second;
         r = m_R[typeInt];
-        ArithmeticDoa::calPhaseTheory(f, r, m_AntennaNum, tp_theory);
-
-        theory = tp_theory;
-        // 虚拟阵列扩展: 启用时构造虚拟阵元理论相位, 增加相位差数据量(扩大等效孔径)
-        if (1 == m_Virtual_Flag)
-        {
-            ArithmeticDoa::getVirtualTheory(m_AntennaNum, tp_theory, m_Virtual_Multiple, theory);
-        }
+        ArithmeticDoa::calPhaseTheory(f, r, m_AntennaNum, theory);
 
         m_Theory[typeInt] = theory;
-
-        if (1 == m_Virtual_Flag)
-        {
-            PublicSpace::Log("initTheory virtual: typeInt=%d, cols=%d, virMultiple=%.4f\n",
-                             typeInt, (int)theory[0].size(), m_Virtual_Multiple);
-            PublicSpace::Log("  original col0=%.4f, col1=%.4f, virtual col11=%.4f\n",
-                             theory[0][0], theory[0][1], theory[0][11]);
-        }
     }
 }
 
@@ -2188,31 +1720,6 @@ double SpoofingDoa::circularMeanDeg(const std::vector<double> &degs)
         double rad = d * PI / 180.0;
         s += sin(rad);
         c += cos(rad);
-    }
-    return atan2(s, c) * 180.0 / PI;
-}
-
-double SpoofingDoa::circularMeanDegWeighted(const std::vector<double> &degs, const std::vector<double> &weights)
-{
-    double s = 0.0;
-    double c = 0.0;
-    double wsum = 0.0;
-    size_t n = std::min(degs.size(), weights.size());
-    for (size_t i = 0; i < n; ++i)
-    {
-        double rad = degs[i] * PI / 180.0;
-        double w = weights[i];
-        if (w < 0.0)
-        {
-            w = 0.0;
-        }
-        s += w * sin(rad);
-        c += w * cos(rad);
-        wsum += w;
-    }
-    if (wsum <= 0.0)
-    {
-        return circularMeanDeg(degs);
     }
     return atan2(s, c) * 180.0 / PI;
 }
@@ -2284,21 +1791,12 @@ double SpoofingDoa::circularSpan180Deg(const std::vector<double> &degs)
 
 /**
  * @brief 欺骗检测核心: 判断某频点内卫星相位差是否聚成一簇(欺骗特征)
- *
- * 算法(对应 Python cluster_satellites, fold_half=False)：
- *   1. 筛出两端口信噪比都 ≥ CNR_MIN_DB 的高信噪比卫星。
- *   2. 校正后相位差(周) ×360 转角度，再用 normalizeAngle180 归一化到 [-180°, 180°)。
- *   3. 排序后复制一份整体 +360°(解决簇跨 ±180°/0° 边界被漏掉的问题)，用滑动窗口找
- *      "最大覆盖弧 < phsThreshold" 的最大卫星集合；窗口最多含 n 颗，避免同一颗星被其
- *      复制份重复计数。
- *   4. 若最大集合卫星数 > m_Detection_Threshold[typeInt] 则判为欺骗报警。
- *
- * 物理含义：真实卫星来自不同方向，相位差分散；欺骗信号同源，相位差会聚成一簇。
- *
  * @param typeInt            频点编码(sys*100+type)
- * @param dataA              该频点各卫星相位差(已校正)
- * @param alarmSatelliteData 输出: 被判为欺骗的卫星列表
+ * @param dataA              该频点各卫星相位差
+ * @param alarmSatelliteData 输出: 被判为欺骗的卫星
  * @param alarm              输出: 1=报警(欺骗), 0=正常
+ * @note 算法: 筛出高信噪比卫星 → 相位差归一化到 180° → 找最大聚集窗口 →
+ *       聚集数超过阈值(m_Detection_Threshold)则报警
  */
 void SpoofingDoa::calAlarmByPhaseDiff(int typeInt, const std::vector<SatelliteDataPhaseDiffA> &dataA, std::vector<SatelliteDataPhaseDiffA> &alarmSatelliteData, int &alarm)
 {
@@ -2377,12 +1875,12 @@ void SpoofingDoa::LogSpoofingResult(const SpoofingResult result)
     PublicSpace::Log(" %s   Spoofing num = %d\n", nowT.c_str(), result.i_Count);
     for (int i = 0; i < result.i_Count; i++)
     {
-        PublicSpace::Log("Sys=%s,Type=%s,Count=%d\n",
-                         GetSysName(result.i_SatelliteAngle[i].i_Sys), GetTypeName(result.i_SatelliteAngle[i].i_Sys, result.i_SatelliteAngle[i].i_Type), result.i_SatelliteAngle[i].i_Count);
+        PublicSpace::Log("Sys=%d,Type=%d,Count=%d,Angle=%.2f\n",
+                         result.i_SatelliteAngle[i].i_Sys, result.i_SatelliteAngle[i].i_Type, result.i_SatelliteAngle[i].i_Count, result.i_SatelliteAngle[i].i_Angle);
         PublicSpace::Log("{\n");
         for (int j = 0; j < result.i_SatelliteAngle[i].i_Count; j++)
         {
-            PublicSpace::Log("Prn=%d,Snr=%.1f,Angle=%.5f,Quality=%.5f;\n",
+            PublicSpace::Log("Prn=%d,Snr=%.1f,Angle=%.1f,Quality=%.2f;\n",
                              result.i_SatelliteAngle[i].i_AlarmData[j].i_Prn, result.i_SatelliteAngle[i].i_AlarmData[j].i_Snr, result.i_SatelliteAngle[i].i_AlarmData[j].i_Angle, result.i_SatelliteAngle[i].i_AlarmData[j].i_Quality);
         }
         PublicSpace::Log("}\n");
@@ -2398,21 +1896,21 @@ void SpoofingDoa::LogGNSSData(const GNSSData data, int n)
         for (int i = 0; i < data.i_PortOneNum; i++)
         {
             tp = data.i_PortOne[i];
-            PublicSpace::Log("%d-1,Sys=%s,Type=%s,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);
+            PublicSpace::Log("%d-1,Sys=%d,Type=%d,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);
         }
         PublicSpace::Log("%d-2,i_PortTwoNum:%d\n", n, data.i_PortTwoNum);
         for (int i = 0; i < data.i_PortTwoNum; i++)
         {
             tp = data.i_PortTwo[i];
-            PublicSpace::Log("%d-2,Sys=%s,Type=%s,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);
+            PublicSpace::Log("%d-2,Sys=%d,Type=%d,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);
         }
     }
 }
 
 void SpoofingDoa::LogSatelliteDataPhaseDiffB(const SatelliteDataPhaseDiffB tp)
 {
-    PublicSpace::Log("Sys=%s,Type=%s,Prn=%d\n",
-                     GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn);
+    PublicSpace::Log("Sys=%d,Type=%d,Prn=%d\n",
+                     tp.i_Sys, tp.i_Type, tp.i_Prn);
     PublicSpace::Log("       snr1=[");
     for (int j = 0; j < tp.i_diffLen; j++)
     {
@@ -2440,8 +1938,8 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffB(const vector<SatelliteDataPhaseDiff
     for (unsigned int i = 0; i < dataB.size(); i++)
     {
         tp = dataB[i];
-        PublicSpace::Log("Sys=%s,Type=%s,Prn=%d\n",
-                         GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn);
+        PublicSpace::Log("Sys=%d,Type=%d,Prn=%d\n",
+                         tp.i_Sys, tp.i_Type, tp.i_Prn);
         PublicSpace::Log("       snr1=[");
         for (int j = 0; j < tp.i_diffLen; j++)
         {
@@ -2469,8 +1967,8 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffA(const vector<SatelliteDataPhaseDiff
     for (unsigned int i = 0; i < dataA.size(); i++)
     {
         SatelliteDataPhaseDiffA tp = dataA[i];
-        PublicSpace::Log("Sys=%s,Type=%s,Prn=%d,snr1=%.2f,snr2=%.2f,phasediff=%.2f\n",
-                         GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn, tp.i_Snr1, tp.i_Snr2, tp.i_phase_diff * 360);
+        PublicSpace::Log("Sys=%d,Type=%d,Prn=%d,snr1=%.2f,snr2=%.2f,phasediff=%.2f\n",
+                         tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Snr1, tp.i_Snr2, tp.i_phase_diff * 360);
     }
 }
 
@@ -2478,8 +1976,8 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffA(const SatelliteDataPhaseDiffA dataA
 {
 
     SatelliteDataPhaseDiffA tp = dataA;
-    PublicSpace::Log("Sys=%s,Type=%s,Prn=%d,snr1=%.2f,snr2=%.2f,phasediff=%.2f\n",
-                     GetSysName(tp.i_Sys), GetTypeName(tp.i_Sys, tp.i_Type), tp.i_Prn, tp.i_Snr1, tp.i_Snr2, tp.i_phase_diff * 360);
+    PublicSpace::Log("Sys=%d,Type=%d,Prn=%d,snr1=%.2f,snr2=%.2f,phasediff=%.2f\n",
+                     tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Snr1, tp.i_Snr2, tp.i_phase_diff * 360);
 }
 
 void SpoofingDoa::LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<SatelliteDataPhaseDiffA>> dataT)
@@ -2539,7 +2037,6 @@ struct GN902State
     void clearResult()
     {
         result.i_Count = 0;
-        result.i_DetectionCount = 0;
         for (int i = 0; i < 24; ++i)
         {
             result.i_SatelliteAngle[i].i_Sys = 0;
@@ -2596,8 +2093,8 @@ static void collectFixedPairPhaseDiff(GN902State *st, const GNSSData *data, int 
     for (size_t i = 0; i < diff.size(); ++i)
     {
         const SatelliteDataPhaseDiffA &s = diff[i];
-        fprintf(fp, "  PRN=%d, Sys=%s, Type=%s, Snr1=%.1f, Snr2=%.1f, PhaseDiff=%.6f周(%.2f度)\n",
-                s.i_Prn, GetSysName(s.i_Sys), GetTypeName(s.i_Sys, s.i_Type), s.i_Snr1, s.i_Snr2,
+        fprintf(fp, "  PRN=%d, Sys=%d, Type=%d, Snr1=%.1f, Snr2=%.1f, PhaseDiff=%.6f周(%.2f度)\n",
+                s.i_Prn, s.i_Sys, s.i_Type, s.i_Snr1, s.i_Snr2,
                 s.i_phase_diff, s.i_phase_diff * 360.0);
     }
     fflush(fp);
@@ -2653,22 +2150,7 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     return;
 }
 
-// 配置虚拟阵元测向(转发到引擎 SpoofingDoa::configVirtualDoa)
-void GN902::SetVirtualDoa(bool secondaryDoa, bool virtualExpand, double virMultiple){
-    std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
-    if (it == g_gn902State.end() || it->second->eng == 0)
-    {
-        return;
-    }
-    it->second->eng->configVirtualDoa(secondaryDoa, virtualExpand, virMultiple);
-    return;
-}
-
-// 设置数据(流式喂入一帧)
-// 轮边界 = 校正刀(天线对{1,1})再次出现：此时上一轮(校正+六测向)已完整结束，
-// 触发 Detect()+Doa() 结算上一轮，然后清空缓冲、把当前校正刀作为新一轮的第一帧。
-// 特殊天线对 {8,9}/{9,8} 为固定基线采集模式，不参与循环切刀、不进入测向。
-// 注意：实际使用中每刀只喂最后一秒(1帧)，故每轮每刀只累积 1 帧(oneCutFrams=1, 不平滑)。
+// 设置数据
 // @param data 数据指针
 // @param cutIdx_1 通道1天线索引(参考天线，固定为1)
 // @param cutIdx_2 通道2天线索引(1=校正, 2..7=六测向刀)
@@ -2726,16 +2208,8 @@ void GN902::GetResult(SpoofingResult& result){
     return;
 }
 
-// 检测(整轮组批)
-// 把当前轮缓冲的逐帧数据按"引擎行序"重新组批：row0=校正刀, row1..6=六测向刀，
-// 然后一次性喂入引擎，完成循环切刀欺骗检测与跟踪(跨轮状态在引擎内连续累积)。
-//
-// 组批要点：
-//   - 校正刀(cut=0)存入 st->calFrames(每轮刷新)；六测向刀(cut=1..6)按切刀序号分桶(detByCut)。
-//   - 若六刀帧数一致(C)且校正帧数 ≥ C，则取校正帧末尾 C 帧 + 每刀 C 帧，得到 7×C 的 batch
-//     (oneCutFrams=C, smooth=true)；否则每行取末帧(oneCutFrams=1, smooth=false)。
-//   - 六刀必须齐全，缺刀则丢弃本轮(实际使用中每刀只喂 1 帧，main902 在末尾用空帧补齐缺刀)。
-//   - 组批后调用 configCyclicRuntime 设定本轮 oneCutFrams/smooth，再 setGNSSData 喂入引擎。
+// 检测
+// 整轮组批并喂入引擎，完成循环切刀欺骗检测与跟踪(跨轮状态在引擎内连续累积)。
 void GN902::Detect(){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
     if (it == g_gn902State.end() || it->second->eng == 0)

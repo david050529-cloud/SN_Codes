@@ -1,11 +1,10 @@
 {
     "method": 90,
     "method type": 0,
-    "datDir": "E:/gn/jiance_flow/0902/data",
-    "debugFile": "E:/gn/jiance_flow/0902/djmLog/2026-09-02.debug",
-    "logFile": "E:/gn/jiance_flow/0902/gn902_result.log",
-    "switchSeconds": 1,
-    "virtualSecondaryDoa": false,
-    "virtualExpand": false,
-    "virtualMultiple": 0.94
+    "datDir": "/home/huari/Codes/codes/new3/902_data/0909_3/data",
+    "debugFile": "/home/huari/Codes/codes/new3/902_data/0909_3/djmLog/2026-09-02.debug",
+    "logFile": "/home/huari/Codes/codes/new3/902_data/0909_3/gn902_result.log",
+    "switchSeconds": 1
 }
+
+// /home/huari/Codes/codes/new3/902_data/0909_3/data

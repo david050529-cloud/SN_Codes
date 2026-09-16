@@ -4181,14 +4181,10 @@ int main141(json jsonData){
 //   "port1File"       : 端口1 dat 文件（可选，优先于 datDir）
 //   "debugFile"       : 切刀时刻表 debug 文件（含 OpenAntenna code 标记）
 //   "logFile"         : 结果日志输出路径（默认 ./gn902_result.log）
-//   "switchSeconds"   : 每刀保留末尾稳定秒数（默认 8，与 Python SWITCH_SECONDS=8 对齐）
+//   "switchSeconds"   : 每刀保留末尾稳定秒数（默认 1，与 Python 流程对齐）
 //   可选阈值覆盖（不设则用引擎默认，与 Python 硬编码阈值一致）:
 //   "phsDiffThreshold" / "satelliteCountThreshold" / "cutCountThreshold" /
 //   "sysEnum" / "typeEnum"
-//   可选虚拟阵元测向（不设则默认关闭，与引擎默认一致）:
-//   "virtualSecondaryDoa" : 虚拟干涉仪二次测向(解相位模糊), true/false
-//   "virtualExpand"       : 虚拟阵列扩孔径, true/false
-//   "virtualMultiple"     : 虚拟倍率(默认 0.94, <1 缩短基线解模糊, >1 扩大孔径)
 // =============================================================================
 
 // 同时输出到命令行与日志文件
@@ -4214,28 +4210,14 @@ static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
     for (int i = 0; i < r.i_Count; ++i)
     {
         const SatelliteAngle& sa = r.i_SatelliteAngle[i];
-        gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 被欺骗卫星数=%d\n",
-                     GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Count);
+        gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=%.2f° 被欺骗卫星数=%d\n",
+                     GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Angle, sa.i_Count);
         for (int j = 0; j < sa.i_Count; ++j)
         {
             const AlarmData& ad = sa.i_AlarmData[j];
-            gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%.5f Quality=%.5f\n",
+            gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%.1f Quality=%.2f\n",
                          ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
         }
-    }
-
-    // 逐 code 检测明细(对应 Python 详细报警记录)：每刀聚类判为欺骗的频点与聚集卫星
-    for (int i = 0; i < r.i_DetectionCount; ++i)
-    {
-        const DetectionRecord& d = r.i_Detection[i];
-        std::string sats;
-        for (int k = 0; k < d.i_Count; ++k)
-        {
-            if (k) sats += ", ";
-            sats += std::to_string(d.i_ClusterSats[k]);
-        }
-        gn902LogLine(logFp, "  检测 code=%d %s %s 聚集卫星=[%s]\n",
-                     d.i_Code, GetSysName(d.i_Sys), GetTypeName(d.i_Sys, d.i_Type), sats.c_str());
     }
 }
 
@@ -4250,7 +4232,7 @@ int main902(json jsonData)
     if (jsonData.count("port1File")) port1File = jsonData["port1File"].get<std::string>();
     if (jsonData.count("debugFile")) debugFile = jsonData["debugFile"].get<std::string>();
     logFile = jsonData.count("logFile") ? jsonData["logFile"].get<std::string>() : "./gn902_result.log";
-    int switchSeconds = jsonData.count("switchSeconds") ? jsonData["switchSeconds"].get<int>() : 8;
+    int switchSeconds = jsonData.count("switchSeconds") ? jsonData["switchSeconds"].get<int>() : 1;
 
     // 固定基线采集模式(可选): 配置里提供 fixedPair=[通道1天线,通道2天线] 时，
     // 不按 debug 切刀时刻表做循环切刀，而是把每个公共 GPS 秒作为该固定天线对
@@ -4382,17 +4364,6 @@ int main902(json jsonData)
         int type = jsonData.count("typeEnum") ? jsonData["typeEnum"].get<int>() : -1;
         ret = SetThresholdDetection_GN902(id, phsTh, satTh, cutTh, sys, type);
         if (ret != 0) gn902LogLine(logFp, "[GN902] SetThresholdDetection_GN902 失败 ret=%d\n", ret);
-    }
-
-    // 虚拟阵元测向配置（可选，不设则默认关闭，与引擎默认一致）
-    {
-        bool secondaryDoa  = jsonData.count("virtualSecondaryDoa") ? jsonData["virtualSecondaryDoa"].get<bool>() : false;
-        bool virtualExpand = jsonData.count("virtualExpand")       ? jsonData["virtualExpand"].get<bool>()       : false;
-        double virMultiple = jsonData.count("virtualMultiple")     ? jsonData["virtualMultiple"].get<double>()  : 0.94;
-        ret = SetVirtualDoa_GN902(id, secondaryDoa ? 1 : 0, virtualExpand ? 1 : 0, virMultiple);
-        if (ret != 0) gn902LogLine(logFp, "[GN902] SetVirtualDoa_GN902 失败 ret=%d\n", ret);
-        else gn902LogLine(logFp, "[GN902] 虚拟阵元测向: 二次测向=%d 扩孔径=%d 倍率=%.4f\n",
-                          secondaryDoa ? 1 : 0, virtualExpand ? 1 : 0, virMultiple);
     }
 
     // ---- 8. 流式喂入 ----

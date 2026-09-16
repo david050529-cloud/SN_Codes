@@ -2596,23 +2596,6 @@ int SetThresholdDetection_GN902(int id, double phsDiffThreshold, double satellit
 	return 0;
 }
 
-// 设置GN902虚拟阵元测向参数
-// @param id 算法id
-// @param secondaryDoa 是否启用虚拟干涉仪二次测向(解相位模糊, 1=是 0=否)
-// @param virtualExpand 是否启用虚拟阵列扩展(扩大等效孔径, 1=是 0=否)
-// @param virMultiple 虚拟倍率(<1 缩短基线解模糊, >1 扩大孔径)
-// @return 正确运行返回0，错误id返回1
-int SetVirtualDoa_GN902(int id, int secondaryDoa, int virtualExpand, double virMultiple){
-	if(id < 0 || id >= GN902Container.size() || !GN902Container[id]){
-        Log("SetVirtualDoa_GN902 failed\n");
-        return 1;
-    }
-	GN902* p = GN902Container[id];
-	p->SetVirtualDoa(secondaryDoa != 0, virtualExpand != 0, virMultiple);
-	Log("SetVirtualDoa_GN902 success, id=%d\n", id);
-	return 0;
-}
-
 
 // 设置GN902对象数据
 // @param id 算法id
