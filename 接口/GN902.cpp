@@ -1000,11 +1000,6 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
-    // 本轮任意测向刀报警的频点集合(对应 Python current_alarms)。用整轮报警频点集合
-    // 而非"连续报警尾段"：已确认跟踪的频点即使本刀未报警，也要保留其卫星参与跨周期
-    // 基线累积，否则 B2b/GPS/Galileo 等只在部分刀报警的频点会因基线永远凑不齐 6 条
-    // 而无法测向(报警频点/卫星数偏少)。
-    std::set<int> roundAlarms;
 
     for (int j = 0; j < cutNum; ++j)
     {
@@ -1031,7 +1026,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
                     sids.insert(s.i_Prn);
                 }
                 cutAlarms[typeInt] = sids;
-                roundAlarms.insert(typeInt);
             }
         }
 
@@ -1063,19 +1057,16 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
                 }
             }
         }
-    }
 
-    for (int j = 0; j < cutNum; ++j)
-    {
+        // 与 Python detection_main 对齐：仅用本刀给出欺骗警告(current_alarms=cutAlarms)
+        // 频点的卫星参与基线累积，不使用本刀未报警(即使已确认/跟踪中)的相位差，避免
+        // 混入真星相位差导致测向角度错乱。逐刀就地过滤，保留跨周期基线的"最近一条
+        // 有效相位差"语义(accumulateBaselines 只在 SNR 有效时覆盖对应刀位)。
         vector<SatelliteDataPhaseDiffA> filtered;
         for (auto &sat : dataA[j])
         {
             int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
-            // 与 Python 对齐：基线累积针对 (current_alarms ∪ tracking) 频点的全部稳定卫星
-            // (而非仅 cluster_sats 或仅已跟踪频点)。current_alarms 即本轮任意测向刀报警的
-            // 频点(roundAlarms)，首次报警(连续=1)那一轮也要累积基线，否则会漏掉该轮跨周期
-            // 相位差。测向候选星仍由 getCrossCycleDataB 限定为 cluster_sats，不影响检测结果。
-            if (m_Tracking.find(typeInt) != m_Tracking.end() || roundAlarms.find(typeInt) != roundAlarms.end())
+            if (cutAlarms.find(typeInt) != cutAlarms.end())
             {
                 filtered.emplace_back(sat);
             }
