@@ -4214,8 +4214,8 @@ static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
     for (int i = 0; i < r.i_Count; ++i)
     {
         const SatelliteAngle& sa = r.i_SatelliteAngle[i];
-        gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=%.2f° 被欺骗卫星数=%d\n",
-                     GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Angle, sa.i_Count);
+        gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 被欺骗卫星数=%d\n",
+                     GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Count);
         for (int j = 0; j < sa.i_Count; ++j)
         {
             const AlarmData& ad = sa.i_AlarmData[j];

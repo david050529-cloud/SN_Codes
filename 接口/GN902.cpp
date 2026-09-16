@@ -2329,8 +2329,8 @@ void SpoofingDoa::LogSpoofingResult(const SpoofingResult result)
     PublicSpace::Log(" %s   Spoofing num = %d\n", nowT.c_str(), result.i_Count);
     for (int i = 0; i < result.i_Count; i++)
     {
-        PublicSpace::Log("Sys=%s,Type=%s,Count=%d,Angle=%.5f\n",
-                         GetSysName(result.i_SatelliteAngle[i].i_Sys), GetTypeName(result.i_SatelliteAngle[i].i_Sys, result.i_SatelliteAngle[i].i_Type), result.i_SatelliteAngle[i].i_Count, result.i_SatelliteAngle[i].i_Angle);
+        PublicSpace::Log("Sys=%s,Type=%s,Count=%d\n",
+                         GetSysName(result.i_SatelliteAngle[i].i_Sys), GetTypeName(result.i_SatelliteAngle[i].i_Sys, result.i_SatelliteAngle[i].i_Type), result.i_SatelliteAngle[i].i_Count);
         PublicSpace::Log("{\n");
         for (int j = 0; j < result.i_SatelliteAngle[i].i_Count; j++)
         {
