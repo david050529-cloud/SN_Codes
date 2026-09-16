@@ -4181,7 +4181,7 @@ int main141(json jsonData){
 //   "port1File"       : 端口1 dat 文件（可选，优先于 datDir）
 //   "debugFile"       : 切刀时刻表 debug 文件（含 OpenAntenna code 标记）
 //   "logFile"         : 结果日志输出路径（默认 ./gn902_result.log）
-//   "switchSeconds"   : 每刀保留末尾稳定秒数（默认 1，与 Python 流程对齐）
+//   "switchSeconds"   : 每刀保留末尾稳定秒数（默认 8，与 Python SWITCH_SECONDS=8 对齐）
 //   可选阈值覆盖（不设则用引擎默认，与 Python 硬编码阈值一致）:
 //   "phsDiffThreshold" / "satelliteCountThreshold" / "cutCountThreshold" /
 //   "sysEnum" / "typeEnum"
@@ -4223,6 +4223,20 @@ static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
                          ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
         }
     }
+
+    // 逐 code 检测明细(对应 Python 详细报警记录)：每刀聚类判为欺骗的频点与聚集卫星
+    for (int i = 0; i < r.i_DetectionCount; ++i)
+    {
+        const DetectionRecord& d = r.i_Detection[i];
+        std::string sats;
+        for (int k = 0; k < d.i_Count; ++k)
+        {
+            if (k) sats += ", ";
+            sats += std::to_string(d.i_ClusterSats[k]);
+        }
+        gn902LogLine(logFp, "  检测 code=%d %s %s 聚集卫星=[%s]\n",
+                     d.i_Code, GetSysName(d.i_Sys), GetTypeName(d.i_Sys, d.i_Type), sats.c_str());
+    }
 }
 
 int main902(json jsonData)
@@ -4236,7 +4250,7 @@ int main902(json jsonData)
     if (jsonData.count("port1File")) port1File = jsonData["port1File"].get<std::string>();
     if (jsonData.count("debugFile")) debugFile = jsonData["debugFile"].get<std::string>();
     logFile = jsonData.count("logFile") ? jsonData["logFile"].get<std::string>() : "./gn902_result.log";
-    int switchSeconds = jsonData.count("switchSeconds") ? jsonData["switchSeconds"].get<int>() : 1;
+    int switchSeconds = jsonData.count("switchSeconds") ? jsonData["switchSeconds"].get<int>() : 8;
 
     // 固定基线采集模式(可选): 配置里提供 fixedPair=[通道1天线,通道2天线] 时，
     // 不按 debug 切刀时刻表做循环切刀，而是把每个公共 GPS 秒作为该固定天线对

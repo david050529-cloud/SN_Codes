@@ -369,10 +369,23 @@ struct SatelliteAngle
     AlarmData i_AlarmData[32]; // 最多32颗报警卫星详情
 };
 
+// 逐 code 检测明细(对应 Python detection_main 的"详细报警记录")：记录每一刀聚类判为
+// 欺骗的频点及其聚集卫星号，供逐 code 输出，避免只在测向轮聚合后输出导致报警信息偏少。
+struct DetectionRecord
+{
+    int i_Code;              // 切刀 code(9/57/17/25/33/1)
+    int i_Sys;               // 卫星系统编码
+    int i_Type;              // 频点编码
+    int i_Count;             // 聚集卫星数
+    int i_ClusterSats[32];   // 聚集卫星号列表
+};
+
 struct SpoofingResult
 {
     int i_Count;                          // 报警频点数
     SatelliteAngle i_SatelliteAngle[24];  // 最多24个频点的结果
+    int i_DetectionCount;                 // 逐 code 检测明细条数(本轮)
+    DetectionRecord i_Detection[256];     // 逐 code 检测明细
 };
 
 
@@ -563,6 +576,7 @@ private:
     std::map<int, std::map<int, SatelliteDataPhaseDiffA>> m_CorrectionData;   ///< 通道校正相位差(按频点/PRN)
     std::map<int, std::vector<AlarmData>> m_AngleResultData;                  ///< 测向结果: 各频点报警卫星列表
     std::map<int, std::map<int, double>> m_Max_Snr;                           ///< 各频点各星最大信噪比
+    std::vector<DetectionRecord> m_DetectionRecords;                          ///< 本轮逐 code 检测明细(每轮 setDataAngle 重建)
 
     // =========================================================================
     // 循环切刀欺骗检测状态（对应 Python detection_lib.py）

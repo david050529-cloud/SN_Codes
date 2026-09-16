@@ -671,15 +671,15 @@ SpoofingDoa::SpoofingDoa(void){
     setThresholdDetectionDoa(0, 2, 4, -1);    // GPS L5
     setThresholdDetectionDoa(1, 0, 2, 5.0);   // GLONASS G1
     setThresholdDetectionDoa(1, 1, 3, 5.0);   // GLONASS G2
-    setThresholdDetectionDoa(3, 2, 3, 3.6);   // Galileo E1C
-    setThresholdDetectionDoa(3, 12, 4, 3.6);  // Galileo E5a
-    setThresholdDetectionDoa(3, 17, 4, 3.6);  // Galileo E5b
+    setThresholdDetectionDoa(3, 2, 3, 5.0);   // Galileo E1C
+    setThresholdDetectionDoa(3, 12, 4, 5.0);  // Galileo E5a
+    setThresholdDetectionDoa(3, 17, 4, 5.0);  // Galileo E5b
     setThresholdDetectionDoa(4, 17, 3, -1);   // BDS B2I
     setThresholdDetectionDoa(4, 0, 3, -1);    // BDS B1I
     setThresholdDetectionDoa(4, 2, 3, -1);    // BDS B3I
     setThresholdDetectionDoa(4, 8, 2, -1);    // BDS B1C
     setThresholdDetectionDoa(4, 19, 3, -1);   // BDS B2b
-    setThresholdDetectionDoa(4, 34, 3, 3.6);  // BDS B1X
+    setThresholdDetectionDoa(4, 34, 3, 5.0);  // BDS B1X
 }
 
 /**
@@ -831,6 +831,18 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
         ++count;
     }
     result.i_Count = count;
+
+    // 逐 code 检测明细复制到结果(供 main902 逐 code 打印)
+    int detCount = (int)m_DetectionRecords.size();
+    if (detCount > 256)
+    {
+        detCount = 256;
+    }
+    result.i_DetectionCount = detCount;
+    for (int i = 0; i < detCount; ++i)
+    {
+        result.i_Detection[i] = m_DetectionRecords[i];
+    }
 }
 
 /**
@@ -843,6 +855,7 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
 void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
 {
     string nowT = getNowTime();
+    m_DetectionRecords.clear();   // 每轮重建逐 code 检测明细
 
     PublicSpace::Log("cal phase diff cutNum:  %s \n", nowT.c_str());
     vector<vector<SatelliteDataPhaseDiffA>> dataA;
@@ -1345,6 +1358,18 @@ void SpoofingDoa::configVirtualDoa(bool secondaryDoa, bool virtualExpand, double
  *
  * @param dataA 各切刀逐星相位差(已校正)，本函数会原地筛选为"连续报警尾段"各报警刀频点的卫星
  */
+// 切刀序号(0=校正, 1..6=六测向刀) → Python OpenAntenna code
+// 校正 {1,1}→0, 测向 {1,2}→9, {1,3}→57, {1,4}→17, {1,5}→25, {1,6}→33, {1,7}→1
+static int cutIndexToCode(int j)
+{
+    static const int codeByIndex[7] = {0, 9, 57, 17, 25, 33, 1};
+    if (j < 0 || j >= 7)
+    {
+        return -1;
+    }
+    return codeByIndex[j];
+}
+
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
@@ -1378,6 +1403,26 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
                 }
                 cutAlarms[typeInt] = sids;
             }
+        }
+
+        // 逐 code 检测明细：记录本刀聚类判为欺骗的频点及其聚集卫星(对应 Python 详细报警记录)
+        for (auto &kv : cutAlarms)
+        {
+            int typeInt = kv.first;
+            DetectionRecord rec;
+            rec.i_Code = cutIndexToCode(j);
+            rec.i_Sys = typeInt / 100;
+            rec.i_Type = typeInt % 100;
+            int n = (int)kv.second.size();
+            if (n > 32) n = 32;
+            rec.i_Count = n;
+            int k = 0;
+            for (int sid : kv.second)
+            {
+                if (k >= 32) break;
+                rec.i_ClusterSats[k++] = sid;
+            }
+            m_DetectionRecords.emplace_back(rec);
         }
 
         for (auto &kv : m_ConsecutiveAlarm)
@@ -2494,6 +2539,7 @@ struct GN902State
     void clearResult()
     {
         result.i_Count = 0;
+        result.i_DetectionCount = 0;
         for (int i = 0; i < 24; ++i)
         {
             result.i_SatelliteAngle[i].i_Sys = 0;
