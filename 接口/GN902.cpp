@@ -1677,10 +1677,13 @@ void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<Satell
 
                     double phs_tp = data.i_PortOne[i].i_Phase - data.i_PortTwo[j].i_Phase;
 
-                    double diff = phs_tp - (long long int)phs_tp;
+                    // 用 fmod 精确取相位差的小数部分(周)，替代 (long long int) 截断相减：
+                    // fmod 按 IEEE754 计算 x - trunc(x)，无整数截断/回转型的舍入误差，
+                    // 对较大累积相位(整周数)更稳，提升用于测向的相位差精度。
+                    double diff = fmod(phs_tp, 1.0);
                     if (diff < 0)
                     {
-                        diff = diff + 1;
+                        diff += 1.0;
                     }
                     tp.i_phase_diff = diff;
                     dataA.emplace_back(tp);
