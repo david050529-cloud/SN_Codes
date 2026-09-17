@@ -671,14 +671,24 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
                     t.doa_deg = mean;
                     t.quality = sumQ / doas.size();
                 }
-                // 锁存最近一次成功测向的逐星结果, 供后续测向失败时复用(对齐 Python last_doa)
-                t.last_alarms = m_AngleResultData[typeInt];
             }
-            else if (!t.last_alarms.empty())
+            else if (m_ConsecutiveAlarm[typeInt] == 0 && t.doa_deg >= 0.0)
             {
-                // 测向失败(基线不齐/质量不足)时复用上次成功测向的逐星结果,
-                // 不再用 cluster_sats 配均值角重发(那会导致逐星角度一致、Snr=0)。
-                m_AngleResultData[typeInt] = t.last_alarms;
+                vector<AlarmData> kept;
+                for (int sid : t.cluster_sats)
+                {
+                    AlarmData ad;
+                    ad.i_Prn = sid;
+                    ad.i_Angle = t.doa_deg;
+                    ad.i_Quality = t.quality;
+                    ad.i_Snr = 0.0f;
+                    if (m_Max_Snr.find(typeInt) != m_Max_Snr.end() && m_Max_Snr[typeInt].find(sid) != m_Max_Snr[typeInt].end())
+                    {
+                        ad.i_Snr = (float)m_Max_Snr[typeInt][sid];
+                    }
+                    kept.emplace_back(ad);
+                }
+                m_AngleResultData[typeInt] = kept;
             }
         }
     }
@@ -1024,10 +1034,13 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             if (cutAlarms.find(kv.first) == cutAlarms.end())
             {
                 kv.second = 0;
-                // 与 Python detection_main 对齐：本刀未报警则无条件清空该频点跨周期
-                // 基线。否则已跟踪频点的异常卫星(如 B2a 的 Prn39/33)旧基线长期保留、
-                // 参与后续测向，把来向角拉偏(B2a 被拉到 0°~2°)。
-                m_Baselines.erase(kv.first);
+                // 已确认跟踪的频点保留其跨周期基线(不因本刀未报警而清空)，仅未跟踪的
+                // 频点清空基线。否则只在部分刀报警的频点会反复清空基线、永远凑不齐 6 条
+                // 测向基线，导致报警频点/卫星数偏少。
+                if (m_Tracking.find(kv.first) == m_Tracking.end())
+                {
+                    m_Baselines.erase(kv.first);
+                }
             }
         }
         for (auto &kv : cutAlarms)
@@ -1045,15 +1058,16 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             }
         }
 
-        // 与 Python detection_main 对齐：仅用本刀给出欺骗警告(current_alarms=cutAlarms)
-        // 频点的卫星参与基线累积，不使用本刀未报警(即使已确认/跟踪中)的相位差，避免
-        // 混入真星相位差导致测向角度错乱。逐刀就地过滤，保留跨周期基线的"最近一条
-        // 有效相位差"语义(accumulateBaselines 只在 SNR 有效时覆盖对应刀位)。
+                // 卫星级过滤：只保留"当前刀报警频点"且"被 cluster 判定为欺骗"的卫星。
+        // 与 Python detection_main 中 baselines 只累积报警频点的稳定卫星语义一致，
+        // 避免 Prn=39/33 等非 cluster 卫星混入 dataB 后被累积到 m_Baselines，拉偏来向角。
         vector<SatelliteDataPhaseDiffA> filtered;
         for (auto &sat : dataA[j])
         {
             int typeInt = TypeInt(sat.i_Sys, sat.i_Type);
-            if (cutAlarms.find(typeInt) != cutAlarms.end())
+            auto ca = cutAlarms.find(typeInt);
+            if (ca != cutAlarms.end() &&
+                ca->second.find(sat.i_Prn) != ca->second.end())
             {
                 filtered.emplace_back(sat);
             }
@@ -1068,6 +1082,14 @@ void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB>
     {
         int typeInt = TypeInt(b.i_Sys, b.i_Type);
         int prn = b.i_Prn;
+
+        // 二次保护：只累积已跟踪频点且属于 cluster 的卫星，与 Python baselines
+        // 只累积 cluster_sats 的语义一致。避免 Prn=39/33 等卫星通过 m_Baselines
+        // 凑齐 6 条测向刀位后被送入测向，拉偏来向角。
+        auto itt = m_Tracking.find(typeInt);
+        if (itt == m_Tracking.end()) continue;
+        if (itt->second.cluster_sats.find(prn) == itt->second.cluster_sats.end()) continue;
+
         auto &inner = m_Baselines[typeInt];
         auto itp = inner.find(prn);
         if (itp == inner.end())
@@ -1088,7 +1110,6 @@ void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB>
         }
     }
 }
-
 void SpoofingDoa::getCrossCycleDataB(std::vector<SatelliteDataPhaseDiffB> &doaDataB)
 {
     doaDataB.clear();

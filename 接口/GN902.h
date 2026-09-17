@@ -531,7 +531,6 @@ private:
         std::set<int> cluster_sats;   ///< 被跟踪的欺骗卫星簇(PRN集合)
         double doa_deg = -1.0;        ///< 当前跟踪的测向角度(度, -1=未确定)
         double quality = -1.0;        ///< 当前跟踪的测向质量(0-100, -1=未确定)
-        std::vector<AlarmData> last_alarms;  ///< 最近一次成功测向的逐星结果(测向失败时复用, 对齐 Python last_doa)
     };
     std::map<int, TrackingInfo> m_Tracking;      ///< 各频点欺骗跟踪状态
 
