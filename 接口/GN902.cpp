@@ -398,18 +398,18 @@ double ArithmeticDoa::getDoaMass(const vector<double> diffTheory, const vector<d
  */
 SpoofingDoa::SpoofingDoa(void){
     Init();
-    setThresholdDetectionDoa(0, 2, 4, -1);    // GPS L5
+    setThresholdDetectionDoa(0, 2, 3, -1);    // GPS L5
     setThresholdDetectionDoa(1, 0, 2, 5.0);   // GLONASS G1
     setThresholdDetectionDoa(1, 1, 3, 5.0);   // GLONASS G2
-    setThresholdDetectionDoa(3, 2, 3, 3.6);   // Galileo E1C
-    setThresholdDetectionDoa(3, 12, 4, 3.6);  // Galileo E5a
-    setThresholdDetectionDoa(3, 17, 4, 3.6);  // Galileo E5b
+    setThresholdDetectionDoa(3, 2, 3, 5.0);   // Galileo E1C
+    setThresholdDetectionDoa(3, 12, 3, 5.0);  // Galileo E5a
+    setThresholdDetectionDoa(3, 17, 3, 5.0);  // Galileo E5b
     setThresholdDetectionDoa(4, 17, 3, -1);   // BDS B2I
     setThresholdDetectionDoa(4, 0, 3, -1);    // BDS B1I
     setThresholdDetectionDoa(4, 2, 3, -1);    // BDS B3I
     setThresholdDetectionDoa(4, 8, 2, -1);    // BDS B1C
     setThresholdDetectionDoa(4, 19, 3, -1);   // BDS B2b
-    setThresholdDetectionDoa(4, 34, 3, 3.6);  // BDS B1X
+    setThresholdDetectionDoa(4, 34, 3, 5.0);  // BDS B1X
 }
 
 /**
