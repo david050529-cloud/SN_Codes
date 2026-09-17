@@ -4212,16 +4212,25 @@ static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
         const SatelliteAngle& sa = r.i_SatelliteAngle[i];
         if (sa.i_Angle < 0)
         {
-            // 本轮无测向结果 → 角度输出 -1
-            gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=-1 被欺骗卫星数=0\n",
-                         GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm);
-            continue;
+            // 本轮该频点未测出来向角度 → 角度输出 -1；被欺骗卫星数仍按跟踪到的
+            // 欺骗卫星簇照常输出，不因没测出角度而丢掉卫星明细。
+            gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=-1 被欺骗卫星数=%d\n",
+                         GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Count);
         }
-        gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=%.2f° 被欺骗卫星数=%d\n",
-                     GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Angle, sa.i_Count);
+        else
+        {
+            gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=%.2f° 被欺骗卫星数=%d\n",
+                         GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Angle, sa.i_Count);
+        }
         for (int j = 0; j < sa.i_Count; ++j)
         {
             const AlarmData& ad = sa.i_AlarmData[j];
+            if (ad.i_Angle < 0)
+            {
+                gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=-1 Quality=-1\n",
+                             ad.i_Prn, ad.i_Snr);
+                continue;
+            }
             gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%.1f Quality=%.2f\n",
                          ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
         }

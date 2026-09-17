@@ -518,7 +518,11 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
 {
     int count = 0;
     // 实时输出当前轮测向结果：遍历已跟踪频点，有测向结果才输出角度，
-    // 否则输出 -1；不再把历史(上一轮)的测向结果回填到当前轮。
+    // 否则来向角度输出 -1；不再把历史(上一轮)的测向结果回填到当前轮。
+    //
+    // 但"被欺骗卫星数"是报警频点自身的属性，不是测向结果的属性：只要该频点已确认
+    // 报警(在 m_Tracking 中)，就按其跟踪到的欺骗卫星簇(cluster_sats)输出卫星明细；
+    // 本轮没测出角度的卫星, 其 Angle/Quality 记 -1，不把整块明细丢掉(count=0)。
     for (auto &kv : m_Tracking)
     {
         if (count >= 24)
@@ -526,44 +530,110 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
             break;
         }
         int typeInt = kv.first;
+        const TrackingInfo &t = kv.second;
         auto it = m_AngleResultData.find(typeInt);
 
         result.i_SatelliteAngle[count].i_Sys = typeInt / 100;
         result.i_SatelliteAngle[count].i_Type = typeInt % 100;
         result.i_SatelliteAngle[count].i_Alarm = 1;
 
-        if (it == m_AngleResultData.end() || it->second.empty())
+        // 被欺骗卫星集合 = 跟踪到的欺骗卫星簇；跟踪簇为空时回退到本轮测向卫星。
+        std::set<int> sats = t.cluster_sats;
+        if (sats.empty() && it != m_AngleResultData.end())
         {
-            // 当前轮无测向结果 → 来向角度 -1
-            result.i_SatelliteAngle[count].i_Angle = -1.0;
-            result.i_SatelliteAngle[count].i_Count = 0;
-            ++count;
-            continue;
+            for (unsigned int i = 0; i < it->second.size(); i++)
+            {
+                sats.insert(it->second[i].i_Prn);
+            }
         }
 
-        const vector<AlarmData> &alarms = it->second;
         vector<double> doas;
-        doas.reserve(alarms.size());
-        for (unsigned int i = 0; i < alarms.size(); i++)
+        int n = 0;
+        for (int prn : sats)
         {
-            doas.push_back(alarms[i].i_Angle);
+            if (n >= 32)
+            {
+                break;
+            }
+            AlarmData ad;
+            ad.i_Prn = prn;
+            ad.i_Snr = (float)getSatMaxSnr(typeInt, prn);
+            ad.i_Angle = -1.0;
+            ad.i_Quality = -1.0;
+
+            if (it != m_AngleResultData.end())
+            {
+                for (unsigned int i = 0; i < it->second.size(); i++)
+                {
+                    if (it->second[i].i_Prn == prn)
+                    {
+                        ad.i_Angle = it->second[i].i_Angle;
+                        ad.i_Quality = it->second[i].i_Quality;
+                        doas.push_back(ad.i_Angle);
+                        break;
+                    }
+                }
+            }
+            result.i_SatelliteAngle[count].i_AlarmData[n] = ad;
+            ++n;
         }
-        double angle = circularMeanDeg(doas);
-        if (angle < 0)
+        result.i_SatelliteAngle[count].i_Count = n;
+
+        if (doas.empty())
         {
-            angle += 360.0;
+            // 本轮没有任何一颗卫星测出角度 → 来向角度 -1，但卫星明细照常给出
+            result.i_SatelliteAngle[count].i_Angle = -1.0;
         }
-        result.i_SatelliteAngle[count].i_Angle = angle;
-        result.i_SatelliteAngle[count].i_Count = (int)alarms.size();
-        for (unsigned int i = 0; i < alarms.size(); i++)
+        else
         {
-            int prn = alarms[i].i_Prn;
-            result.i_SatelliteAngle[count].i_AlarmData[i] = alarms[i];
-            result.i_SatelliteAngle[count].i_AlarmData[i].i_Snr = m_Max_Snr[typeInt][prn];
+            double angle = circularMeanDeg(doas);
+            if (angle < 0)
+            {
+                angle += 360.0;
+            }
+            result.i_SatelliteAngle[count].i_Angle = angle;
         }
         ++count;
     }
     result.i_Count = count;
+}
+
+double SpoofingDoa::getSatMaxSnr(int typeInt, int prn)
+{
+    double snr = 0.0;
+    auto its = m_Baselines.find(typeInt);
+    if (its != m_Baselines.end())
+    {
+        auto itp = its->second.find(prn);
+        if (itp != its->second.end())
+        {
+            const SatelliteDataPhaseDiffB &b = itp->second;
+            for (int j = 0; j < b.i_diffLen && j < 100; ++j)
+            {
+                if (b.i_Snr1[j] > snr)
+                {
+                    snr = b.i_Snr1[j];
+                }
+                if (b.i_Snr2[j] > snr)
+                {
+                    snr = b.i_Snr2[j];
+                }
+            }
+        }
+    }
+    if (snr <= 0.0)
+    {
+        auto itm = m_Max_Snr.find(typeInt);
+        if (itm != m_Max_Snr.end())
+        {
+            auto itmp = itm->second.find(prn);
+            if (itmp != itm->second.end())
+            {
+                snr = itmp->second;
+            }
+        }
+    }
+    return snr;
 }
 
 /**
@@ -1055,9 +1125,13 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             }
         }
 
-                // 卫星级过滤：只保留"当前刀报警频点"且"被 cluster 判定为欺骗"的卫星。
-        // 与 Python detection_main 中 baselines 只累积报警频点的稳定卫星语义一致，
-        // 避免 Prn=39/33 等非 cluster 卫星混入 dataB 后被累积到 m_Baselines，拉偏来向角。
+        // 卫星级过滤：保留两类卫星
+        //   (1) 当前刀报警频点中被 cluster 判定为欺骗的卫星；
+        //   (2) 已跟踪频点的欺骗卫星簇(cluster_sats)中的卫星——即使本刀该频点未报警。
+        // (2) 使测向不再严格受限于"完整测向轮内的报警刀位"：已给出报警的信号可以在
+        // 任意刀位、任意轮次累积相位差，跨轮次凑齐 6 条测向基线后即可测向。
+        // 非 cluster 卫星(未参与过该频点欺骗聚类的卫星)仍被排除，避免其混入
+        // m_Baselines 后凑齐 6 条基线参与测向、把来向角拉偏。
         vector<SatelliteDataPhaseDiffA> filtered;
         for (auto &sat : dataA[j])
         {
@@ -1065,6 +1139,13 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             auto ca = cutAlarms.find(typeInt);
             if (ca != cutAlarms.end() &&
                 ca->second.find(sat.i_Prn) != ca->second.end())
+            {
+                filtered.emplace_back(sat);
+                continue;
+            }
+            auto itr = m_Tracking.find(typeInt);
+            if (itr != m_Tracking.end() &&
+                itr->second.cluster_sats.find(sat.i_Prn) != itr->second.cluster_sats.end())
             {
                 filtered.emplace_back(sat);
             }
@@ -2255,18 +2336,24 @@ void GN902::Detect(){
         return; // 尚无校正数据则丢弃本轮(跨轮连续/跟踪状态不变)
     }
 
-    // 测向轮需六刀齐全；缺刀则丢弃本轮
+    // 测向轮缺刀不再整轮丢弃：缺失的测向刀用空帧(无卫星)补齐，引擎仍按
+    // 7 刀(校正刀 + 六测向刀)组批。缺刀位对应的相位差由跨周期基线 m_Baselines
+    // 补缺，即“测向不再严格限制在完整的测向轮内”。
+    GNSSData emptyCut;
+    memset(&emptyCut, 0, sizeof(emptyCut));
+    bool cutComplete = true;
     for (int r = 0; r < 6; ++r)
     {
         if (detByCut[r].empty())
         {
-            return;
+            cutComplete = false;
+            break;
         }
     }
 
-    // 六测向刀每刀帧数是否一致
+    // 六测向刀每刀帧数是否一致(缺刀时按“每刀取末帧”路径处理)
     int C = (int)detByCut[0].size();
-    bool detUniform = true;
+    bool detUniform = cutComplete;
     for (int r = 1; r < 6; ++r)
     {
         if ((int)detByCut[r].size() != C)
@@ -2311,12 +2398,19 @@ void GN902::Detect(){
     }
     else
     {
-        // 帧数不一致(或校正帧不足) -> 每行取末尾(最稳定)一帧
+        // 帧数不一致(或校正帧不足) -> 每行取末尾(最稳定)一帧；缺刀的行用空帧占位
         batch.reserve(7);
         batch.push_back(calRow.back());
         for (int r = 0; r < 6; ++r)
         {
-            batch.push_back(frameData[detByCut[r].back()]);
+            if (detByCut[r].empty())
+            {
+                batch.push_back(emptyCut);
+            }
+            else
+            {
+                batch.push_back(frameData[detByCut[r].back()]);
+            }
         }
     }
 

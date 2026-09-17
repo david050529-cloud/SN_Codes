@@ -316,8 +316,8 @@ struct AlarmData
     //   QZSS(5)     : 193~202
     int i_Prn;
     float i_Snr;      // 载噪比
-    double i_Angle;   // 测向角度
-    double i_Quality; // 测向质量（0-100）
+    double i_Angle;   // 测向角度；-1 表示本轮该星未测出来向角度
+    double i_Quality; // 测向质量（0-100）；-1 表示本轮该星未测出来向角度
 };
 
 
@@ -326,8 +326,8 @@ struct SatelliteAngle
     int i_Sys;       // 卫星系统
     int i_Type;      // 卫星频点
     int i_Alarm;     // 报警标识：0=正常，1=欺骗
-    double i_Angle;  // 欺骗信号来向角度（度）
-    int i_Count;     // 被欺骗卫星数
+    double i_Angle;  // 欺骗信号来向角度（度）；-1 表示本轮该频点未测出来向角度
+    int i_Count;     // 被欺骗卫星数(= 跟踪到的欺骗卫星簇大小)，与是否测出角度无关
     AlarmData i_AlarmData[32]; // 最多32颗报警卫星详情
 };
 
@@ -479,6 +479,16 @@ private:
     void getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     void setSpoofingResult(SpoofingResult &result);
     void calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoData);
+
+    /**
+     * @brief 取某频点某星的载噪比(用于报警卫星明细)
+     * @param typeInt 频点编码(sys*100+type)
+     * @param prn     卫星号
+     * @return 最大载噪比(dB-Hz); 无数据返回 0.0
+     * @note 优先取跨周期累积基线中该星任意刀位的最大值(不要求凑齐 6 条基线),
+     *       回退到测向时记录的 m_Max_Snr。避免未测出角度的卫星信噪比恒为 0。
+     */
+    double getSatMaxSnr(int typeInt, int prn);
     void saveGNSSData(const GNSSData *data, int dataLen);
 
     // ---- 角度工具（静态，对应 Python detection_lib 的角度函数）----
