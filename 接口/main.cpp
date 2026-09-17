@@ -4210,6 +4210,13 @@ static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
     for (int i = 0; i < r.i_Count; ++i)
     {
         const SatelliteAngle& sa = r.i_SatelliteAngle[i];
+        if (sa.i_Angle < 0)
+        {
+            // 本轮无测向结果 → 角度输出 -1
+            gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=-1 被欺骗卫星数=0\n",
+                         GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm);
+            continue;
+        }
         gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=%.2f° 被欺骗卫星数=%d\n",
                      GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Angle, sa.i_Count);
         for (int j = 0; j < sa.i_Count; ++j)

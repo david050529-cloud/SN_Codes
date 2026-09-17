@@ -517,33 +517,48 @@ int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
 void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
 {
     int count = 0;
-    int typeInt = 0;
-    double angle = 0.0;
-    int prn = 0;
-    for (auto it = m_AngleResultData.begin(); it != m_AngleResultData.end(); ++it)
+    // 实时输出当前轮测向结果：遍历已跟踪频点，有测向结果才输出角度，
+    // 否则输出 -1；不再把历史(上一轮)的测向结果回填到当前轮。
+    for (auto &kv : m_Tracking)
     {
-        typeInt = it->first;
+        if (count >= 24)
+        {
+            break;
+        }
+        int typeInt = kv.first;
+        auto it = m_AngleResultData.find(typeInt);
+
         result.i_SatelliteAngle[count].i_Sys = typeInt / 100;
         result.i_SatelliteAngle[count].i_Type = typeInt % 100;
         result.i_SatelliteAngle[count].i_Alarm = 1;
-        vector<AlarmData> tp = it->second;
-        vector<double> doas;
-        doas.reserve(tp.size());
-        for (unsigned int i = 0; i < tp.size(); i++)
+
+        if (it == m_AngleResultData.end() || it->second.empty())
         {
-            doas.push_back(tp[i].i_Angle);
+            // 当前轮无测向结果 → 来向角度 -1
+            result.i_SatelliteAngle[count].i_Angle = -1.0;
+            result.i_SatelliteAngle[count].i_Count = 0;
+            ++count;
+            continue;
         }
-        angle = tp.empty() ? -1.0 : circularMeanDeg(doas);
+
+        const vector<AlarmData> &alarms = it->second;
+        vector<double> doas;
+        doas.reserve(alarms.size());
+        for (unsigned int i = 0; i < alarms.size(); i++)
+        {
+            doas.push_back(alarms[i].i_Angle);
+        }
+        double angle = circularMeanDeg(doas);
         if (angle < 0)
         {
             angle += 360.0;
         }
         result.i_SatelliteAngle[count].i_Angle = angle;
-        result.i_SatelliteAngle[count].i_Count = (int)tp.size();
-        for (unsigned int i = 0; i < tp.size(); i++)
+        result.i_SatelliteAngle[count].i_Count = (int)alarms.size();
+        for (unsigned int i = 0; i < alarms.size(); i++)
         {
-            prn = tp[i].i_Prn;
-            result.i_SatelliteAngle[count].i_AlarmData[i] = tp[i];
+            int prn = alarms[i].i_Prn;
+            result.i_SatelliteAngle[count].i_AlarmData[i] = alarms[i];
             result.i_SatelliteAngle[count].i_AlarmData[i].i_Snr = m_Max_Snr[typeInt][prn];
         }
         ++count;
@@ -671,24 +686,6 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
                     t.doa_deg = mean;
                     t.quality = sumQ / doas.size();
                 }
-            }
-            else if (m_ConsecutiveAlarm[typeInt] == 0 && t.doa_deg >= 0.0)
-            {
-                vector<AlarmData> kept;
-                for (int sid : t.cluster_sats)
-                {
-                    AlarmData ad;
-                    ad.i_Prn = sid;
-                    ad.i_Angle = t.doa_deg;
-                    ad.i_Quality = t.quality;
-                    ad.i_Snr = 0.0f;
-                    if (m_Max_Snr.find(typeInt) != m_Max_Snr.end() && m_Max_Snr[typeInt].find(sid) != m_Max_Snr[typeInt].end())
-                    {
-                        ad.i_Snr = (float)m_Max_Snr[typeInt][sid];
-                    }
-                    kept.emplace_back(ad);
-                }
-                m_AngleResultData[typeInt] = kept;
             }
         }
     }
