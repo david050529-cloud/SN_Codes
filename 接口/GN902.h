@@ -531,7 +531,7 @@ private:
         std::set<int> cluster_sats;   ///< 被跟踪的欺骗卫星簇(PRN集合)
         double doa_deg = -1.0;        ///< 当前跟踪的测向角度(度, -1=未确定)
         double quality = -1.0;        ///< 当前跟踪的测向质量(0-100, -1=未确定)
-        int no_alarm_cycles = 0;      ///< 连续未报警周期数(超过超时阈值则清理簇, 对齐 Python last_doa 锁存)
+        std::vector<AlarmData> last_alarms;  ///< 最近一次成功测向的逐星结果(测向失败时复用, 对齐 Python last_doa)
     };
     std::map<int, TrackingInfo> m_Tracking;      ///< 各频点欺骗跟踪状态
 
@@ -548,11 +548,6 @@ protected:
     /// 连续报警确认次数: 某频点需连续 m_Detection_Recodds_Num 次检测到欺骗
     /// 才将其卫星簇纳入跟踪, 用于滤除偶发跳变(对应 Python 的 ALARM_CONSECUTIVE_P)。
     int m_Detection_Recodds_Num = 1;
-
-    /// 跟踪超时周期数: 某频点连续 m_Tracking_Timeout_Cycles 个完整周期未报警,
-    /// 则清除其跟踪卫星簇与旧测向角, 防止异常卫星(如 B2a 的 Prn39/33)永久残留
-    /// 并通过"旧结果锁存"分支继续污染来向角(与 Python 只锁存最近一次成功测向对齐)。
-    int m_Tracking_Timeout_Cycles = 3;
 
     /// 阵列阵元数量(7)。
     int m_AntennaNum = 7;

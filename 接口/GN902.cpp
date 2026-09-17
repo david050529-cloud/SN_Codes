@@ -671,24 +671,14 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
                     t.doa_deg = mean;
                     t.quality = sumQ / doas.size();
                 }
+                // 锁存最近一次成功测向的逐星结果, 供后续测向失败时复用(对齐 Python last_doa)
+                t.last_alarms = m_AngleResultData[typeInt];
             }
-            else if (m_ConsecutiveAlarm[typeInt] == 0 && t.doa_deg >= 0.0)
+            else if (!t.last_alarms.empty())
             {
-                vector<AlarmData> kept;
-                for (int sid : t.cluster_sats)
-                {
-                    AlarmData ad;
-                    ad.i_Prn = sid;
-                    ad.i_Angle = t.doa_deg;
-                    ad.i_Quality = t.quality;
-                    ad.i_Snr = 0.0f;
-                    if (m_Max_Snr.find(typeInt) != m_Max_Snr.end() && m_Max_Snr[typeInt].find(sid) != m_Max_Snr[typeInt].end())
-                    {
-                        ad.i_Snr = (float)m_Max_Snr[typeInt][sid];
-                    }
-                    kept.emplace_back(ad);
-                }
-                m_AngleResultData[typeInt] = kept;
+                // 测向失败(基线不齐/质量不足)时复用上次成功测向的逐星结果,
+                // 不再用 cluster_sats 配均值角重发(那会导致逐星角度一致、Snr=0)。
+                m_AngleResultData[typeInt] = t.last_alarms;
             }
         }
     }
@@ -1000,7 +990,6 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
-    std::set<int> cycleAlarmed;   // 本周期内任一测向刀报警过的频点(用于跟踪超时判定)
 
     for (int j = 0; j < cutNum; ++j)
     {
@@ -1046,7 +1035,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             int typeInt = kv.first;
             int c = m_ConsecutiveAlarm[typeInt] + 1;
             m_ConsecutiveAlarm[typeInt] = c;
-            cycleAlarmed.insert(typeInt);
             if (c >= m_Detection_Recodds_Num)
             {
                 TrackingInfo &t = m_Tracking[typeInt];
@@ -1071,31 +1059,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             }
         }
         dataA[j] = filtered;
-    }
-
-    // 跟踪超时清理：与 Python 只锁存最近一次成功测向(last_doa)对齐。频点连续
-    // 多个周期未报警时，其旧 cluster_sats 与旧 doa_deg 不应继续通过 setDataAngle
-    // 的"旧结果锁存"分支重新构造报警结果(异常卫星 Prn39/33 会永久残留并拉偏来向角)。
-    for (auto &kv : m_Tracking)
-    {
-        int typeInt = kv.first;
-        TrackingInfo &t = kv.second;
-        if (cycleAlarmed.find(typeInt) == cycleAlarmed.end())
-        {
-            t.no_alarm_cycles++;
-            if (t.no_alarm_cycles >= m_Tracking_Timeout_Cycles)
-            {
-                t.cluster_sats.clear();
-                t.doa_deg = -1.0;
-                t.quality = -1.0;
-                m_Baselines.erase(typeInt);
-                m_ConsecutiveAlarm.erase(typeInt);
-            }
-        }
-        else
-        {
-            t.no_alarm_cycles = 0;
-        }
     }
 }
 
