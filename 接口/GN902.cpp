@@ -1067,6 +1067,7 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
+    m_AlarmMoments.clear();
 
     for (int j = 0; j < cutNum; ++j)
     {
@@ -1125,13 +1126,9 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             }
         }
 
-        // 卫星级过滤：保留两类卫星
-        //   (1) 当前刀报警频点中被 cluster 判定为欺骗的卫星；
-        //   (2) 已跟踪频点的欺骗卫星簇(cluster_sats)中的卫星——即使本刀该频点未报警。
-        // (2) 使测向不再严格受限于"完整测向轮内的报警刀位"：已给出报警的信号可以在
-        // 任意刀位、任意轮次累积相位差，跨轮次凑齐 6 条测向基线后即可测向。
-        // 非 cluster 卫星(未参与过该频点欺骗聚类的卫星)仍被排除，避免其混入
-        // m_Baselines 后凑齐 6 条基线参与测向、把来向角拉偏。
+        // 卫星级过滤：只保留"本时刻给出报警的频点"中"被本时刻相位差聚类判为欺骗"的
+        // 卫星。真星(未参与报警的卫星)的相位差、以及该频点未给出报警的时刻的相位差，
+        // 一律不进入跨周期基线、也不参与测向。
         vector<SatelliteDataPhaseDiffA> filtered;
         for (auto &sat : dataA[j])
         {
@@ -1141,17 +1138,106 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
                 ca->second.find(sat.i_Prn) != ca->second.end())
             {
                 filtered.emplace_back(sat);
-                continue;
-            }
-            auto itr = m_Tracking.find(typeInt);
-            if (itr != m_Tracking.end() &&
-                itr->second.cluster_sats.find(sat.i_Prn) != itr->second.cluster_sats.end())
-            {
-                filtered.emplace_back(sat);
             }
         }
         dataA[j] = filtered;
+
+        if (filtered.empty())
+        {
+            continue;
+        }
+
+        // 把本时刻的相位差并入跨周期基线(只覆盖本刀位)。基线因此只由"给出报警的时刻"
+        // 的相位差构成；跨轮次累积后仍可凑齐 6 条测向基线，无需借助未报警的相位差。
+        {
+            vector<vector<SatelliteDataPhaseDiffA>> oneCut(cutNum);
+            oneCut[j] = filtered;
+            vector<SatelliteDataPhaseDiffB> cutDataB;
+            int savedDeletePrnFlag = m_Delete_Prn_Flag;
+            m_Delete_Prn_Flag = 0;
+            getSatelliteDataPhaseDiffB(oneCut, cutDataB);
+            m_Delete_Prn_Flag = savedDeletePrnFlag;
+            accumulateBaselines(cutDataB);
+        }
+
+        // 本时刻给出报警的频点：立即测向，生成"报警时刻"记录。
+        // 输出单位是"时刻是否给出报警"，不按整轮罗列已跟踪频点。
+        for (auto &kv : cutAlarms)
+        {
+            int typeInt = kv.first;
+
+            AlarmMoment am = {};
+            am.i_Cut = j;
+            am.i_Sys = typeInt / 100;
+            am.i_Type = typeInt % 100;
+            am.i_Alarm = 1;
+            am.i_Angle = -1.0;
+            am.i_Count = 0;
+
+            vector<SatelliteDataPhaseDiffB> doaDataB;
+            getCrossCycleDataBByType(typeInt, kv.second, doaDataB);
+
+            m_AngleResultData.clear();
+            if (!doaDataB.empty())
+            {
+                getResultInterferDoa(doaDataB);
+            }
+
+            const vector<AlarmData> *alarms = 0;
+            auto ita = m_AngleResultData.find(typeInt);
+            if (ita != m_AngleResultData.end())
+            {
+                alarms = &ita->second;
+            }
+
+            vector<double> doas;
+            int n = 0;
+            for (int prn : kv.second)
+            {
+                if (n >= 32)
+                {
+                    break;
+                }
+                AlarmData ad;
+                ad.i_Prn = prn;
+                ad.i_Snr = (float)getSatMaxSnr(typeInt, prn);
+                ad.i_Angle = -1.0;
+                ad.i_Quality = -1.0;
+                if (alarms != 0)
+                {
+                    for (unsigned int i = 0; i < alarms->size(); i++)
+                    {
+                        if ((*alarms)[i].i_Prn == prn)
+                        {
+                            ad.i_Angle = (*alarms)[i].i_Angle;
+                            ad.i_Quality = (*alarms)[i].i_Quality;
+                            doas.push_back(ad.i_Angle);
+                            break;
+                        }
+                    }
+                }
+                am.i_AlarmData[n] = ad;
+                ++n;
+            }
+            am.i_Count = n;
+
+            if (!doas.empty())
+            {
+                double angle = circularMeanDeg(doas);
+                if (angle < 0)
+                {
+                    angle += 360.0;
+                }
+                am.i_Angle = angle;
+            }
+            m_AlarmMoments.emplace_back(am);
+        }
     }
+}
+
+const std::vector<AlarmMoment> &SpoofingDoa::getAlarmMoments(void) const
+{
+    return m_AlarmMoments;
 }
 
 void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB> &dataB)
@@ -1188,6 +1274,25 @@ void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB>
         }
     }
 }
+void SpoofingDoa::getCrossCycleDataBByType(int typeInt, const std::set<int> &sats,
+                                           std::vector<SatelliteDataPhaseDiffB> &doaDataB)
+{
+    doaDataB.clear();
+    auto itt = m_Baselines.find(typeInt);
+    if (itt == m_Baselines.end())
+    {
+        return;
+    }
+    for (int prn : sats)
+    {
+        auto itp = itt->second.find(prn);
+        if (itp != itt->second.end())
+        {
+            doaDataB.emplace_back(itp->second);
+        }
+    }
+}
+
 void SpoofingDoa::getCrossCycleDataB(std::vector<SatelliteDataPhaseDiffB> &doaDataB)
 {
     doaDataB.clear();
@@ -2289,6 +2394,18 @@ void GN902::GetResult(SpoofingResult& result){
     }
     // 取最近一轮(喂入引擎后)的测向结果
     result = it->second->result;
+    return;
+}
+
+// 取最近一轮内所有"报警时刻"的测向结果(按时刻先后排列)
+void GN902::GetAlarmMoments(std::vector<AlarmMoment>& out){
+    out.clear();
+    std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
+    if (it == g_gn902State.end() || it->second->eng == 0)
+    {
+        return;
+    }
+    out = it->second->eng->getAlarmMoments();
     return;
 }
 

@@ -338,6 +338,26 @@ struct SpoofingResult
 };
 
 
+/**
+ * @struct AlarmMoment
+ * @brief 一个"报警时刻"的测向结果。
+ *
+ * 测向结果的输出单位不是"测向轮"，而是"某个切刀时刻某频点给出报警"这一事件：
+ * 每个报警时刻立即用当前已累积的基线(基线只由各报警时刻的相位差累积而成)测向，
+ * 生成一条记录。该时刻尚未测出角度时 i_Angle 记 -1，但 i_Count/i_AlarmData 照常给出。
+ */
+struct AlarmMoment
+{
+    int i_Cut;                 // 该时刻的切刀序号(1..6 = 测向刀 {1,2}..{1,7})
+    int i_Sys;                 // 卫星系统
+    int i_Type;                // 卫星频点
+    int i_Alarm;               // 报警标识：1=欺骗
+    double i_Angle;            // 该时刻测出的来向角度(度)；-1=该时刻尚未测出
+    int i_Count;               // 该时刻报警的欺骗卫星数
+    AlarmData i_AlarmData[32]; // 该时刻报警的卫星明细(未测出角度的卫星 Angle/Quality=-1)
+};
+
+
 
 
 // =============================================================================
@@ -419,6 +439,13 @@ public:
      * @return 0=成功
      */
     int getAngleSpoofingDoa(SpoofingResult &result);
+
+    /**
+     * @brief 取最近一轮内所有"报警时刻"的测向结果
+     * @return 按时刻先后排列的报警记录(每个给出报警的切刀时刻、每个报警频点一条)
+     * @note 记录以"时刻是否给出报警"为准生成，不按整轮罗列已跟踪频点。
+     */
+    const std::vector<AlarmMoment> &getAlarmMoments(void) const;
 
     /**
      * @brief 设置切刀(天线对)序列
@@ -503,6 +530,15 @@ private:
     void accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB> &dataB);
     void getCrossCycleDataB(std::vector<SatelliteDataPhaseDiffB> &doaDataB);
 
+    /**
+     * @brief 取指定频点、指定卫星集合的跨周期累积基线(用于单个报警时刻的实时测向)
+     * @param typeInt  频点编码(sys*100+type)
+     * @param sats     该时刻给出报警的卫星集合
+     * @param doaDataB 输出: 这些卫星已累积的基线(未累积到基线的卫星被跳过)
+     */
+    void getCrossCycleDataBByType(int typeInt, const std::set<int> &sats,
+                                  std::vector<SatelliteDataPhaseDiffB> &doaDataB);
+
     // ---- 日志输出函数(WriteLog.cpp) ----
     void LogSatelliteDataPhaseDiffB(const SatelliteDataPhaseDiffB tp);
     void LogSatelliteDataPhaseDiffB(const vector<SatelliteDataPhaseDiffB> &dataB);
@@ -544,7 +580,9 @@ private:
     };
     std::map<int, TrackingInfo> m_Tracking;      ///< 各频点欺骗跟踪状态
 
-    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;  ///< 跨周期累计的基线相位差(仅连续报警刀累计，中断即清空)
+    std::map<int, std::map<int, SatelliteDataPhaseDiffB>> m_Baselines;  ///< 跨周期累计的基线相位差(只由"给出报警的时刻"累积)
+
+    std::vector<AlarmMoment> m_AlarmMoments;  ///< 最近一轮内各"报警时刻"的测向结果(每轮开头清空)
 
 protected:
     // =========================================================================
@@ -639,6 +677,12 @@ public:
      * @param result 输出结果
      */
     void GetResult(SpoofingResult& result);
+
+    /**
+     * @brief 取最近一轮内所有"报警时刻"的测向结果
+     * @param out 输出: 按时刻先后排列的报警记录
+     */
+    void GetAlarmMoments(std::vector<AlarmMoment>& out);
 
 private:
     void Detect();  ///< 整轮组批并喂入引擎, 完成循环切刀欺骗检测与跟踪

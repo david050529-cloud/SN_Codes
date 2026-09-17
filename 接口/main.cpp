@@ -4203,28 +4203,41 @@ static void gn902LogLine(FILE* logFp, const char* fmt, ...)
     }
 }
 
-// 打印/记录一轮测向结果
-static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
+// 打印/记录一轮内的全部"报警时刻"结果。
+// 输出单位是"某切刀时刻某频点是否给出报警"：给出报警才打印，不再按整轮罗列
+// 已跟踪频点(未给出报警的频点不再输出 -1 占位)。
+// @param cutSec  本轮各切刀时刻(GPS秒), 索引 = 通道2天线号(1..7)
+// @param cutCode 本轮各切刀的原始 code, 索引同上
+static void gn902LogAlarmMoments(FILE* logFp, const std::vector<AlarmMoment>& moments,
+                                 const double* cutSec, const int* cutCode, int& totalFreq)
 {
-    gn902LogLine(logFp, "\n---- 测向轮 %d: 报警频点数 = %d ----\n", round, r.i_Count);
-    for (int i = 0; i < r.i_Count; ++i)
+    for (size_t i = 0; i < moments.size(); ++i)
     {
-        const SatelliteAngle& sa = r.i_SatelliteAngle[i];
-        if (sa.i_Angle < 0)
+        const AlarmMoment& am = moments[i];
+        int pair2 = am.i_Cut + 1;   // 切刀序号(1..6) -> 通道2天线号 2..7
+        double sec = 0.0;
+        int code = -1;
+        if (cutSec != 0 && pair2 >= 2 && pair2 <= 7)
         {
-            // 本轮该频点未测出来向角度 → 角度输出 -1；被欺骗卫星数仍按跟踪到的
-            // 欺骗卫星簇照常输出，不因没测出角度而丢掉卫星明细。
+            sec = cutSec[pair2];
+            code = (cutCode != 0) ? cutCode[pair2] : -1;
+        }
+
+        gn902LogLine(logFp, "\n---- 报警时刻 code=%d 天线对(1,%d) t=%.1fs ----\n", code, pair2, sec);
+        if (am.i_Angle < 0)
+        {
+            // 该时刻尚未测出来向角度 → 角度输出 -1；欺骗卫星数照常给出，不为 0
             gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=-1 被欺骗卫星数=%d\n",
-                         GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Count);
+                         GetSysName(am.i_Sys), GetTypeName(am.i_Sys, am.i_Type), am.i_Alarm, am.i_Count);
         }
         else
         {
             gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=%.2f° 被欺骗卫星数=%d\n",
-                         GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Angle, sa.i_Count);
+                         GetSysName(am.i_Sys), GetTypeName(am.i_Sys, am.i_Type), am.i_Alarm, am.i_Angle, am.i_Count);
         }
-        for (int j = 0; j < sa.i_Count; ++j)
+        for (int j = 0; j < am.i_Count; ++j)
         {
-            const AlarmData& ad = sa.i_AlarmData[j];
+            const AlarmData& ad = am.i_AlarmData[j];
             if (ad.i_Angle < 0)
             {
                 gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=-1 Quality=-1\n",
@@ -4234,6 +4247,7 @@ static void gn902LogResult(FILE* logFp, int round, const SpoofingResult& r)
             gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%.1f Quality=%.2f\n",
                          ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
         }
+        totalFreq++;
     }
 }
 
@@ -4402,11 +4416,16 @@ int main902(json jsonData)
     else
     {
         // 一轮 = 校正刀(1,1) + 六刀测向(1,2)..(1,7)；校正刀再次出现触发上一轮检测+测向。
-        // 缺刀的轮次（如末尾不完整周期）会被引擎丢弃，与 Python 流程一致。
+        // 输出按"报警时刻"给出：每个给出报警的切刀时刻打印一条记录，与轮次无关。
         int roundIdx = 0;
         int doaMask = 0;
         bool inRound = false;
         int totalAlarmCount = 0;
+
+        double cutSec[8] = {0.0};   // 当前轮各切刀的时刻(GPS秒), 索引 = 通道2天线号
+        int    cutCode[8] = {0};    // 当前轮各切刀的原始 code, 索引同上
+        double doneSec[8] = {0.0};  // 即将结算的那一轮的各切刀时刻
+        int    doneCode[8] = {0};   // 即将结算的那一轮的各切刀 code
 
         for (auto& fr : feedFrames)
         {
@@ -4421,14 +4440,22 @@ int main902(json jsonData)
 
             if (cutIdx2 == 1)
             {
-                // 校正刀：先喂（触发上一轮检测+测向），再结算上一轮结果
+                // 校正刀：先记下上一轮各切刀的时刻，再喂（触发上一轮检测+测向），
+                // 然后按"报警时刻"结算上一轮结果。
+                memcpy(doneSec, cutSec, sizeof(cutSec));
+                memcpy(doneCode, cutCode, sizeof(cutCode));
+                memset(cutSec, 0, sizeof(cutSec));
+                memset(cutCode, 0, sizeof(cutCode));
+
                 SetData_GN902(id, &frame, 1, 1);
                 if (inRound && (doaMask & 0xFC) == 0xFC)
                 {
-                    SpoofingResult r;
-                    GetResult_GN902(id, r);
-                    gn902LogResult(logFp, roundIdx, r);
-                    totalAlarmCount += r.i_Count;
+                    std::vector<AlarmMoment> moments;
+                    if (id >= 0 && id < (int)GN902Container.size() && GN902Container[id] != 0)
+                    {
+                        GN902Container[id]->GetAlarmMoments(moments);
+                    }
+                    gn902LogAlarmMoments(logFp, moments, doneSec, doneCode, totalAlarmCount);
                     roundIdx++;
                 }
                 inRound = true;
@@ -4437,6 +4464,8 @@ int main902(json jsonData)
             else
             {
                 SetData_GN902(id, &frame, 1, cutIdx2);
+                cutSec[cutIdx2] = fr.first;
+                cutCode[cutIdx2] = fr.second;
                 inRound = true;
                 doaMask |= (1 << cutIdx2);
             }
@@ -4449,6 +4478,9 @@ int main902(json jsonData)
         // 时凭空多出一轮空结果。
         if (doaMask != 0)
         {
+            memcpy(doneSec, cutSec, sizeof(cutSec));
+            memcpy(doneCode, cutCode, sizeof(cutCode));
+
             for (int cut = 2; cut <= 7; ++cut)
             {
                 if (!(doaMask & (1 << cut)))
@@ -4461,16 +4493,19 @@ int main902(json jsonData)
             GNSSData dummyCal;
             memset(&dummyCal, 0, sizeof(dummyCal));
             SetData_GN902(id, &dummyCal, 1, 1);
-            SpoofingResult r;
-            GetResult_GN902(id, r);
-            gn902LogResult(logFp, roundIdx, r);
-            totalAlarmCount += r.i_Count;
+
+            std::vector<AlarmMoment> moments;
+            if (id >= 0 && id < (int)GN902Container.size() && GN902Container[id] != 0)
+            {
+                GN902Container[id]->GetAlarmMoments(moments);
+            }
+            gn902LogAlarmMoments(logFp, moments, doneSec, doneCode, totalAlarmCount);
             roundIdx++;
         }
 
         // ---- 9. 汇总 ----
         gn902LogLine(logFp, "\n================================================================\n");
-        gn902LogLine(logFp, "GN902 检测完成: 处理 %d 个完整测向轮, 共 %d 个报警频点\n", roundIdx, totalAlarmCount);
+        gn902LogLine(logFp, "GN902 检测完成: 处理 %d 个完整测向轮, 共 %d 个报警时刻记录\n", roundIdx, totalAlarmCount);
         gn902LogLine(logFp, "================================================================\n");
     }
 
