@@ -1000,6 +1000,7 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
+    std::set<int> cycleAlarmed;   // 本周期内任一测向刀报警过的频点(用于跟踪超时判定)
 
     for (int j = 0; j < cutNum; ++j)
     {
@@ -1034,13 +1035,10 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             if (cutAlarms.find(kv.first) == cutAlarms.end())
             {
                 kv.second = 0;
-                // 已确认跟踪的频点保留其跨周期基线(不因本刀未报警而清空)，仅未跟踪的
-                // 频点清空基线。否则只在部分刀报警的频点会反复清空基线、永远凑不齐 6 条
-                // 测向基线，导致报警频点/卫星数偏少。
-                if (m_Tracking.find(kv.first) == m_Tracking.end())
-                {
-                    m_Baselines.erase(kv.first);
-                }
+                // 与 Python detection_main 对齐：本刀未报警则无条件清空该频点跨周期
+                // 基线。否则已跟踪频点的异常卫星(如 B2a 的 Prn39/33)旧基线长期保留、
+                // 参与后续测向，把来向角拉偏(B2a 被拉到 0°~2°)。
+                m_Baselines.erase(kv.first);
             }
         }
         for (auto &kv : cutAlarms)
@@ -1048,6 +1046,7 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             int typeInt = kv.first;
             int c = m_ConsecutiveAlarm[typeInt] + 1;
             m_ConsecutiveAlarm[typeInt] = c;
+            cycleAlarmed.insert(typeInt);
             if (c >= m_Detection_Recodds_Num)
             {
                 TrackingInfo &t = m_Tracking[typeInt];
@@ -1072,6 +1071,31 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             }
         }
         dataA[j] = filtered;
+    }
+
+    // 跟踪超时清理：与 Python 只锁存最近一次成功测向(last_doa)对齐。频点连续
+    // 多个周期未报警时，其旧 cluster_sats 与旧 doa_deg 不应继续通过 setDataAngle
+    // 的"旧结果锁存"分支重新构造报警结果(异常卫星 Prn39/33 会永久残留并拉偏来向角)。
+    for (auto &kv : m_Tracking)
+    {
+        int typeInt = kv.first;
+        TrackingInfo &t = kv.second;
+        if (cycleAlarmed.find(typeInt) == cycleAlarmed.end())
+        {
+            t.no_alarm_cycles++;
+            if (t.no_alarm_cycles >= m_Tracking_Timeout_Cycles)
+            {
+                t.cluster_sats.clear();
+                t.doa_deg = -1.0;
+                t.quality = -1.0;
+                m_Baselines.erase(typeInt);
+                m_ConsecutiveAlarm.erase(typeInt);
+            }
+        }
+        else
+        {
+            t.no_alarm_cycles = 0;
+        }
     }
 }
 
