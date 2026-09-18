@@ -13,6 +13,7 @@
 // 与 interface.h 中同名，保持一致
 extern std::vector<GN902*> GN902Container;
 
+GN902_EXTERN_C char* GetALGVersion();
 GN902_EXTERN_C int Create_GN902(int &id);
 
 GN902_EXTERN_C int SetThresholdDetection_GN902(

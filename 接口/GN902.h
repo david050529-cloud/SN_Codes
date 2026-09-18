@@ -191,7 +191,7 @@ using namespace PublicSpace;
 // =============================================================================
 // 测向算法基类所需结构 (原 Arithmetic/arithmetic.h)
 // =============================================================================
-#pragma pack(1)
+#pragma pack(push, 1)
 
 /**
  * @struct InterferInfo
@@ -207,7 +207,7 @@ struct InterferInfo // 用于测向的相关信息
     double i_Amp[200];        ///< 实测幅度数组（线性值）
 };
 
-#pragma pack()
+#pragma pack(pop)
 
 /**
  * @class ArithmeticDoa
@@ -282,6 +282,7 @@ protected:
 // =============================================================================
 // 宿主/接口共享结构 (原 GN902.h, 保持与 DLL 边界 ABI 一致)
 // =============================================================================
+#pragma pack(push, 1)
 struct SatelliteData
 {
     int i_Prn;      // 卫星号（PRN）
@@ -316,7 +317,7 @@ struct AlarmData
     //   QZSS(5)     : 193~202
     int i_Prn;
     float i_Snr;      // 载噪比
-    double i_Angle;   // 测向角度；-1 表示本轮该星未测出来向角度
+    int i_Angle;   // 测向角度；-1 表示本轮该星未测出来向角度
     double i_Quality; // 测向质量（0-100）；-1 表示本轮该星未测出来向角度
 };
 
@@ -363,7 +364,6 @@ struct AlarmMoment
 // =============================================================================
 // 引擎中间结构 (原 SpoofingDoa.h, 参与通道间数据/单星欺骗结果)
 // =============================================================================
-#pragma pack(1)
 
 // 单颗卫星在两个通道间的相位差数据(细粒度, 单帧)
 struct SatelliteDataPhaseDiffA
@@ -388,7 +388,7 @@ struct SatelliteDataPhaseDiffB
     double i_phase_diff[100] = {0.0};        // 载波相位差(单位:周)，符号=PortOne−PortTwo，索引=切刀序号
 };
 
-#pragma pack()
+#pragma pack(pop)
 
 // =============================================================================
 // SpoofingDoa 主类

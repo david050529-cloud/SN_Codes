@@ -509,6 +509,7 @@ void SpoofingDoa::collectPhaseDiffData(const GNSSData &data, std::vector<Satelli
 int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
 {
     setSpoofingResult(result);
+    cout << " changdu::"<< sizeof(SpoofingResult) << endl;
     PublicSpace::Log("Doa result:\n");
     LogSpoofingResult(result);
     return 0;
@@ -558,7 +559,7 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
             AlarmData ad;
             ad.i_Prn = prn;
             ad.i_Snr = (float)getSatMaxSnr(typeInt, prn);
-            ad.i_Angle = -1.0;
+            ad.i_Angle = -1;
             ad.i_Quality = -1.0;
 
             if (it != m_AngleResultData.end())
@@ -582,7 +583,7 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
         if (doas.empty())
         {
             // 本轮没有任何一颗卫星测出角度 → 来向角度 -1，但卫星明细照常给出
-            result.i_SatelliteAngle[count].i_Angle = -1.0;
+            result.i_SatelliteAngle[count].i_Angle = -1;
         }
         else
         {
@@ -743,7 +744,7 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
                 double sumQ = 0.0;
                 for (auto &ad : m_AngleResultData[typeInt])
                 {
-                    doas.push_back((double)ad.i_Angle);
+                    doas.push_back(ad.i_Angle);
                     sumQ += ad.i_Quality;
                 }
                 if (!doas.empty())
@@ -810,7 +811,7 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
             }
 
             tp_alarm.i_Prn = prn;
-            tp_alarm.i_Angle = angle;
+            tp_alarm.i_Angle = (int)angle;
             tp_alarm.i_Quality = quality;
             tp_alarms.emplace_back(tp_alarm);
         }
@@ -1171,7 +1172,7 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             am.i_Sys = typeInt / 100;
             am.i_Type = typeInt % 100;
             am.i_Alarm = 1;
-            am.i_Angle = -1.0;
+            am.i_Angle = -1;
             am.i_Count = 0;
 
             vector<SatelliteDataPhaseDiffB> doaDataB;
@@ -1201,8 +1202,8 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
                 AlarmData ad;
                 ad.i_Prn = prn;
                 ad.i_Snr = (float)getSatMaxSnr(typeInt, prn);
-                ad.i_Angle = -1.0;
-                ad.i_Quality = -1.0;
+                ad.i_Angle = -1;
+                ad.i_Quality = -1;
                 if (alarms != 0)
                 {
                     for (unsigned int i = 0; i < alarms->size(); i++)
@@ -1528,11 +1529,28 @@ void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<Satell
     }
 }
 
-void SpoofingDoa::getSatelliteDataPhaseDiffB(const vector<vector<SatelliteDataPhaseDiffA>> &dataA, vector<SatelliteDataPhaseDiffB> &dataB)
+void SpoofingDoa::getSatelliteDataPhaseDiffB(
+        const vector<vector<SatelliteDataPhaseDiffA>> &dataA,
+        vector<SatelliteDataPhaseDiffB> &dataB)
 {
     vector<SatelliteDataPhaseDiffB> tp_dataB;
     tp_dataB.clear();
+
     int size = (int)dataA.size();
+
+    // ★★★ 关键修复 ★★★
+    // SatelliteDataPhaseDiffB 内 i_Snr1/i_Snr2/i_phase_diff 长度均为 100，
+    // 后面用下标 i（切刀序号）写入，必须保证 i < 100。超长则截断并告警。
+    const int MAX_CUT = 100;
+    if (size > MAX_CUT)
+    {
+        PublicSpace::Log("warning: dataA.size()=%d > %d, truncated\n",
+                         size, MAX_CUT);
+        cout << "warning: dataA.size()=" << size
+             << " > " << MAX_CUT << ", truncated" << endl;
+        size = MAX_CUT;
+    }
+
     SatelliteDataPhaseDiffA tpA;
     SatelliteDataPhaseDiffB tpB;
     for (int i = 0; i < size; i++)
@@ -1545,11 +1563,12 @@ void SpoofingDoa::getSatelliteDataPhaseDiffB(const vector<vector<SatelliteDataPh
             int tpBsize = (int)tp_dataB.size();
             for (unsigned int k = 0; k < tpBsize; k++)
             {
-
-                if (tpA.i_Sys == tp_dataB[k].i_Sys && tpA.i_Type == tp_dataB[k].i_Type && tpA.i_Prn == tp_dataB[k].i_Prn)
+                if (tpA.i_Sys == tp_dataB[k].i_Sys &&
+                    tpA.i_Type == tp_dataB[k].i_Type &&
+                    tpA.i_Prn == tp_dataB[k].i_Prn)
                 {
-                    tp_dataB[k].i_Snr1[i] = tpA.i_Snr1;
-                    tp_dataB[k].i_Snr2[i] = tpA.i_Snr2;
+                    tp_dataB[k].i_Snr1[i]       = tpA.i_Snr1;
+                    tp_dataB[k].i_Snr2[i]       = tpA.i_Snr2;
                     tp_dataB[k].i_phase_diff[i] = tpA.i_phase_diff;
                     flg = false;
                     break;
@@ -1558,17 +1577,18 @@ void SpoofingDoa::getSatelliteDataPhaseDiffB(const vector<vector<SatelliteDataPh
             if (flg)
             {
                 clearSatelliteDataPhaseDiffB(tpB);
-                tpB.i_Sys = tpA.i_Sys;
+                tpB.i_Sys  = tpA.i_Sys;
                 tpB.i_Type = tpA.i_Type;
-                tpB.i_Prn = tpA.i_Prn;
-                tpB.i_Snr1[i] = tpA.i_Snr1;
-                tpB.i_Snr2[i] = tpA.i_Snr2;
+                tpB.i_Prn  = tpA.i_Prn;
+                tpB.i_Snr1[i]       = tpA.i_Snr1;
+                tpB.i_Snr2[i]       = tpA.i_Snr2;
                 tpB.i_phase_diff[i] = tpA.i_phase_diff;
                 tpB.i_diffLen = size;
                 tp_dataB.emplace_back(tpB);
             }
         }
     }
+
     if (1 == m_Delete_Prn_Flag)
     {
         bool tp_flg = true;
@@ -1596,7 +1616,6 @@ void SpoofingDoa::getSatelliteDataPhaseDiffB(const vector<vector<SatelliteDataPh
     }
     tp_dataB.clear();
 }
-
 void SpoofingDoa::getSatelliteDataByType(const std::vector<SatelliteDataPhaseDiffA> &dataA, std::map<int, std::vector<SatelliteDataPhaseDiffA>> &dataT){
     int typeInt = 0;
     SatelliteDataPhaseDiffA tp;
@@ -2231,7 +2250,7 @@ struct GN902State
             result.i_SatelliteAngle[i].i_Sys = 0;
             result.i_SatelliteAngle[i].i_Type = 0;
             result.i_SatelliteAngle[i].i_Alarm = 0;
-            result.i_SatelliteAngle[i].i_Angle = -1.0;
+            result.i_SatelliteAngle[i].i_Angle = -1;
             result.i_SatelliteAngle[i].i_Count = 0;
         }
     }
@@ -2425,9 +2444,7 @@ void GN902::Detect(){
     frameData.swap(st->buf);
     frameCuts.swap(st->cutIndex);
 
-    // 拆帧：
-    //   cut=0  -> 校正刀({1,1})，不参与测向，先存为校正数据；
-    //   cut=1..6 -> 六刀测向刀(对应 {1,2}..{1,7})。
+    // 拆帧：cut=0 -> 校正刀；cut=1..6 -> 六刀测向刀
     std::vector<GNSSData> calNew;
     std::vector<std::vector<int> > detByCut(6); // index = cut-1 (0..5)
     for (size_t i = 0; i < frameCuts.size(); ++i)
@@ -2439,23 +2456,21 @@ void GN902::Detect(){
         }
         else
         {
-            detByCut[c - 1].push_back((int)i); // c 已保证 1..6
+            detByCut[c - 1].push_back((int)i);
         }
     }
 
-    // 本轮出现了校正刀数据 -> 刷新储存的校正数据(替换旧校正，取本轮为准)
+    // 本轮出现了校正刀数据 -> 刷新储存的校正数据
     if (!calNew.empty())
     {
         st->calFrames = calNew;
     }
     if (st->calFrames.empty())
     {
-        return; // 尚无校正数据则丢弃本轮(跨轮连续/跟踪状态不变)
+        return;
     }
 
-    // 测向轮缺刀不再整轮丢弃：缺失的测向刀用空帧(无卫星)补齐，引擎仍按
-    // 7 刀(校正刀 + 六测向刀)组批。缺刀位对应的相位差由跨周期基线 m_Baselines
-    // 补缺，即“测向不再严格限制在完整的测向轮内”。
+    // 测向轮缺刀不再整轮丢弃：缺失的测向刀用空帧补齐
     GNSSData emptyCut;
     memset(&emptyCut, 0, sizeof(emptyCut));
     bool cutComplete = true;
@@ -2468,7 +2483,7 @@ void GN902::Detect(){
         }
     }
 
-    // 六测向刀每刀帧数是否一致(缺刀时按“每刀取末帧”路径处理)
+    // 六测向刀每刀帧数是否一致
     int C = (int)detByCut[0].size();
     bool detUniform = cutComplete;
     for (int r = 1; r < 6; ++r)
@@ -2480,8 +2495,22 @@ void GN902::Detect(){
         }
     }
 
-    // 校正行(引擎 row0)：六刀帧数统一为 C 且校正帧数 >= C 时，取校正帧末尾 C 帧
-    // (最稳定尾段)以便整体平滑；否则使用全部校正帧(将落入“每刀取末帧”路径)。
+    // ★★★ 关键修复 ★★★
+    // batch 大小 = 7*C，会被引擎内部的 SatelliteDataPhaseDiffB 逐帧写入
+    // 长度 100 的栈数组(见 getSatelliteDataPhaseDiffB)。必须保证 7*C <= 100。
+    // 超出时只保留每刀末尾的 MAX_C 帧(最稳定尾段)。
+    const int MAX_C = 14;  // 7*14 = 98 <= 100
+    if (detUniform && C > MAX_C)
+    {
+        for (int r = 0; r < 6; ++r)
+        {
+            detByCut[r].erase(detByCut[r].begin(),
+                              detByCut[r].end() - MAX_C);
+        }
+        C = MAX_C;
+    }
+
+    // 校正行：六刀帧数统一为 C 且校正帧数 >= C 时取末尾 C 帧
     std::vector<GNSSData> calRow;
     if (detUniform && (int)st->calFrames.size() >= C)
     {
@@ -2496,7 +2525,7 @@ void GN902::Detect(){
     int oneCutFrams = uniform ? C : 1;
     bool smooth = uniform;
 
-    // 按引擎行序组批：row0 = 校正(cut=0)，row1..6 = 六刀测向(cut=1..6)
+    // 按引擎行序组批
     std::vector<GNSSData> batch;
     if (uniform)
     {
@@ -2515,7 +2544,6 @@ void GN902::Detect(){
     }
     else
     {
-        // 帧数不一致(或校正帧不足) -> 每行取末尾(最稳定)一帧；缺刀的行用空帧占位
         batch.reserve(7);
         batch.push_back(calRow.back());
         for (int r = 0; r < 6; ++r)
@@ -2531,14 +2559,10 @@ void GN902::Detect(){
         }
     }
 
-    // 运行一轮：引擎 row0 校正刀用于通道校正，六刀测向刀做检测+测向；
-    // 跨轮 m_ConsecutiveAlarm / m_Tracking / m_Baselines 在引擎内持续累积，缺刀位
-    // 用上一周期相位差补齐六条基线。
     st->eng->configCyclicRuntime(true, oneCutFrams, smooth, 0.0);
     st->eng->setGNSSData(batch.data(), (int)batch.size());
     return;
 }
-
 // 测向
 // 从引擎取出本轮测向结果，存入内部 result 供 GetResult 返回。
 void GN902::Doa(){

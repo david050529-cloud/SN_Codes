@@ -5,10 +5,22 @@
 #include <exception>
 #include <iostream>
 
+// #define DOA_DEBUG
+#ifdef _WIN32
+ char Version[] = "V1.6.9.1";
+#else
+ char Version[] = "V1.6.9.1";
+#endif
+
 using namespace std;
 
 // GN902Container 的定义在 GN902.cpp 中，这里只 extern 声明（已在头文件中声明）
 // 不要重复定义！
+
+// 获取版本号 
+char* GetALGVersion(){
+	return Version;
+}
 
 // 创建GN902对象
 int Create_GN902(int & id){
