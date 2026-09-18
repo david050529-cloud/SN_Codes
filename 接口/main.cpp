@@ -57,7 +57,13 @@ int main()
 //   "sysEnum" / "typeEnum"
 // =============================================================================
 
-// 同时输出到命令行与日志文件
+// 同时输出到命令行与日志文件。
+// printf 格式检查(GCC/Clang): 让编译器核对实参与格式串是否匹配 —— 没有它,
+// 类型不匹配只会静默打印错位值(AlarmData::i_Angle 由 double 改 int 后就踩过一次:
+// Angle 列打印出质量分、Quality 列打印出寄存器残留)。
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 2, 3)))
+#endif
 static void gn902LogLine(FILE *logFp, const char *fmt, ...)
 {
 	va_list args;

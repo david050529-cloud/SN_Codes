@@ -95,6 +95,16 @@ namespace PublicSpace
         }
     }
 
+    // printf 格式检查(GCC/Clang): 让编译器在编译期核对可变参数与格式串是否匹配。
+    // 没有它, 类型不匹配(例如 int 字段用 %.1f 打印)不会报错, 只会静默输出错位值/垃圾值:
+    // AlarmData::i_Angle 由 double 改成 int 后, 本文件与 main.cpp 各踩过一次
+    // (Angle 列打印出质量分、Quality 列打印出寄存器残留)。
+#if defined(__GNUC__) || defined(__clang__)
+    void Log(const char *format, ...) __attribute__((format(printf, 1, 2)));
+#else
+    void Log(const char *format, ...);
+#endif
+
     void Log(const char *format, ...){
         std::lock_guard<std::mutex> lock(m_fileMutex);
 
@@ -2185,7 +2195,10 @@ void SpoofingDoa::LogSpoofingResult(const SpoofingResult result)
         PublicSpace::Log("{\n");
         for (int j = 0; j < result.i_SatelliteAngle[i].i_Count; j++)
         {
-            PublicSpace::Log("Prn=%d,Snr=%.1f,Angle=%.1f,Quality=%.2f;\n",
+            // AlarmData::i_Angle 是 int(度), 不能用 %.1f: 变参下 int 走整数寄存器,
+            // %.1f 会取走下一个 SSE 寄存器(即 i_Quality), 于是 Angle 列打印出质量分、
+            // Quality 列打印出未赋值的残留值。这里改为 %d。
+            PublicSpace::Log("Prn=%d,Snr=%.1f,Angle=%d,Quality=%.2f;\n",
                              result.i_SatelliteAngle[i].i_AlarmData[j].i_Prn, result.i_SatelliteAngle[i].i_AlarmData[j].i_Snr, result.i_SatelliteAngle[i].i_AlarmData[j].i_Angle, result.i_SatelliteAngle[i].i_AlarmData[j].i_Quality);
         }
         PublicSpace::Log("}\n");
