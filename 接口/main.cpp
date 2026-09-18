@@ -114,10 +114,79 @@ static void gn902LogAlarmMoments(FILE *logFp, const std::vector<AlarmMoment> &mo
 							 ad.i_Prn, ad.i_Snr);
 				continue;
 			}
-			gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%.1f Quality=%.2f\n",
+			// 注意: AlarmData::i_Angle 是 int(度), 不能用 %f 打印(变参类型不匹配)
+			gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%d Quality=%.2f\n",
 						 ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
 		}
 		totalFreq++;
+	}
+}
+
+// 本轮最后一刀(测向刀)的时刻(GPS秒), 0=本轮没有测向刀时刻。
+// 频点级结果不带时刻, 用它标识"这一轮"。
+static double gn902LastCutSec(const double *cutSec)
+{
+	double last = 0.0;
+	for (int i = 2; i <= 7; ++i)
+	{
+		if (cutSec[i] > last)
+			last = cutSec[i];
+	}
+	return last;
+}
+
+// 打印/记录一次 GetResult_GN902 取回的频点级测向结果(每完成一轮取一次)。
+// 这是对外 C 接口的正式取结果方式: 宿主在自己的栈上定义 SpoofingResult,
+// 由库按引用整体写入 —— 需要两端 ALG/头文件同一次构建(见 main902 开头的 ABI 自检)。
+// @param result   库写入的结果结构体
+// @param roundSec 本轮最后一刀时刻(GPS秒, 0=未知)
+static void gn902LogSpoofingResult(FILE *logFp, const SpoofingResult &result, double roundSec)
+{
+	gn902LogLine(logFp, "\n==== GetResult_GN902: 报警频点数=%d (本轮最后一刀 t=%.1fs) ====\n",
+				 result.i_Count, roundSec);
+	if (result.i_Count <= 0)
+	{
+		gn902LogLine(logFp, "  (本轮无报警频点)\n");
+		return;
+	}
+	// 库最多写 24 个频点 / 每频点最多 32 颗卫星; 越界即为 ABI 不一致的信号,
+	// 这里夹住不下溢, 免得把宿主读崩。
+	if (result.i_Count > 24)
+	{
+		gn902LogLine(logFp, "  [警告] i_Count=%d 超出数组长度 24, 只输出前 24 个\n", result.i_Count);
+	}
+	int freqNum = (result.i_Count > 24) ? 24 : result.i_Count;
+	for (int i = 0; i < freqNum; ++i)
+	{
+		const SatelliteAngle &sa = result.i_SatelliteAngle[i];
+		if (sa.i_Angle < 0)
+		{
+			gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=-1 被欺骗卫星数=%d\n",
+						 GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Count);
+		}
+		else
+		{
+			gn902LogLine(logFp, "  频点 Sys=%s Type=%s Alarm=%d 来向角度=%.2f° 被欺骗卫星数=%d\n",
+						 GetSysName(sa.i_Sys), GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Alarm, sa.i_Angle, sa.i_Count);
+		}
+
+		if (sa.i_Count > 32 || sa.i_Count < 0)
+		{
+			gn902LogLine(logFp, "  [警告] 该频点卫星数=%d 超出数组长度 32\n", sa.i_Count);
+		}
+		int satNum = (sa.i_Count > 32) ? 32 : ((sa.i_Count < 0) ? 0 : sa.i_Count);
+		for (int j = 0; j < satNum; ++j)
+		{
+			const AlarmData &ad = sa.i_AlarmData[j];
+			if (ad.i_Angle < 0)
+			{
+				gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=-1 Quality=-1\n",
+							 ad.i_Prn, ad.i_Snr);
+				continue;
+			}
+			gn902LogLine(logFp, "    卫星 Prn=%d Snr=%.1f Angle=%d Quality=%.2f\n",
+						 ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
+		}
 	}
 }
 
@@ -328,6 +397,7 @@ int main902(json jsonData)
 		int doaMask = 0;
 		bool inRound = false;
 		int totalAlarmCount = 0;
+		int totalResultRound = 0; // 成功调用 GetResult_GN902 取到结果的次数
 
 		double cutSec[8] = {0.0};  // 当前轮各切刀的时刻(GPS秒), 索引 = 通道2天线号
 		int cutCode[8] = {0};	   // 当前轮各切刀的原始 code, 索引同上
@@ -358,6 +428,22 @@ int main902(json jsonData)
 				SetData_GN902(id, &frame, 1, 1);
 				if (inRound && (doaMask & 0xFC) == 0xFC)
 				{
+					// 上一轮已组批检测+测向完成, 通过对外 C 接口取频点级结果。
+					// SpoofingResult 就定义在宿主自己的栈上, 由库按引用整体写入。
+					SpoofingResult result;
+					memset(&result, 0, sizeof(result)); // 先清零: 若输出全 0, 说明库少写了(ABI 不一致)
+					int getRet = GetResult_GN902(id, result);
+					if (getRet != 0)
+					{
+						gn902LogLine(logFp, "[GN902] GetResult_GN902 失败 ret=%d\n", getRet);
+					}
+					else
+					{
+						gn902LogSpoofingResult(logFp, result, gn902LastCutSec(doneSec));
+						totalResultRound++;
+					}
+
+					// 报警时刻级明细仍走类接口(GN902Container), 与上面频点级结果互补
 					std::vector<AlarmMoment> moments;
 					if (id >= 0 && id < (int)GN902Container.size() && GN902Container[id] != 0)
 					{
@@ -402,6 +488,20 @@ int main902(json jsonData)
 			memset(&dummyCal, 0, sizeof(dummyCal));
 			SetData_GN902(id, &dummyCal, 1, 1);
 
+			// 末尾轮同样用对外接口取频点级结果
+			SpoofingResult result;
+			memset(&result, 0, sizeof(result)); // 先清零: 若输出全 0, 说明库少写了(ABI 不一致)
+			int getRet = GetResult_GN902(id, result);
+			if (getRet != 0)
+			{
+				gn902LogLine(logFp, "[GN902] GetResult_GN902 失败 ret=%d\n", getRet);
+			}
+			else
+			{
+				gn902LogSpoofingResult(logFp, result, gn902LastCutSec(doneSec));
+				totalResultRound++;
+			}
+
 			std::vector<AlarmMoment> moments;
 			if (id >= 0 && id < (int)GN902Container.size() && GN902Container[id] != 0)
 			{
@@ -414,6 +514,7 @@ int main902(json jsonData)
 		// ---- 9. 汇总 ----
 		gn902LogLine(logFp, "\n================================================================\n");
 		gn902LogLine(logFp, "GN902 检测完成: 处理 %d 个完整测向轮, 共 %d 个报警时刻记录\n", roundIdx, totalAlarmCount);
+		gn902LogLine(logFp, "GetResult_GN902 取结果成功 %d 次(每完成一轮一次)\n", totalResultRound);
 		gn902LogLine(logFp, "================================================================\n");
 	}
 
