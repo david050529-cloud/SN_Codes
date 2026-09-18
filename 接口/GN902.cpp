@@ -266,6 +266,16 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
     int startAngle = (int)data.i_Start;
     int endAngle = (int)data.i_End;
     int size = data.i_Phase_Len;
+    // 越界防护: i_Phase_Len/i_AntennaSq/i_Phase_Diff 是调用方填进来的,
+    // 条数超过数组长度 200 时下面的 data.i_AntennaSq[i] 会越界读。
+    if (size > 200)
+    {
+        size = 200;
+    }
+    if (size < 0)
+    {
+        size = 0;
+    }
     double max_val = -9999.9;
     int ang_val = 0;
     diff.clear();
@@ -276,10 +286,24 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
     {
         double sumDiff = 0.0;
         tp_ang = Round360(ang);
+        // 越界防护: phaseTheory 是 [角度][阵元] 模板, 有效角度数由模板行数决定,
+        // 模板缺失(该频点未建模板)时直接跳过该角度, 不再读 phaseTheory[tp_ang]。
+        if (tp_ang < 0 || tp_ang >= (int)phaseTheory.size())
+        {
+            continue;
+        }
         for (int i = 0; i < size; i++)
         {
             int antn1 = data.i_AntennaSq[i][0];
             int antn2 = data.i_AntennaSq[i][1];
+            // 越界防护: 天线号由调用方填入, 必须落在 1..阵元数 内,
+            // 否则 phaseTheory[tp_ang][antn-1] 会读到模板行之外。
+            if (antn1 < 1 || antn2 < 1 ||
+                antn1 > (int)phaseTheory[tp_ang].size() ||
+                antn2 > (int)phaseTheory[tp_ang].size())
+            {
+                continue;
+            }
             double theoryPhase = phaseTheory[tp_ang][antn1 - 1] - phaseTheory[tp_ang][antn2 - 1];
             sumDiff = sumDiff + cos(theoryPhase - data.i_Phase_Diff[i]);
         }
@@ -828,7 +852,24 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
 void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, InterferInfo &info, int &doaFlg)
 {
     doaFlg = 1;
+    // 越界防护(两道):
+    //   1) i_Snr1/i_Snr2/i_phase_diff 是长度 100 的数组, diffLen 必须夹到 100;
+    //   2) m_cutSequence 只有一轮切刀数(7)项, 而 diffLen 是"一轮内的行数"。
+    // 原实现直接用 m_cutSequence[j], 一旦行数超过切刀表长度就是读 vector 之外
+    // (未定义行为), 取到的垃圾天线号再被 calInterfer 拿去索引 phaseTheory。
     int diffLen = dataB.i_diffLen;
+    if (diffLen < 0)
+    {
+        diffLen = 0;
+    }
+    if (diffLen > 100)
+    {
+        diffLen = 100;
+    }
+    if (diffLen > (int)m_cutSequence.size())
+    {
+        diffLen = (int)m_cutSequence.size();
+    }
     int count = 0;
     float maxSnr = 0.0f;
 
@@ -841,7 +882,15 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
         {
             continue;
         }
-        if (m_cutSequence[j][0] == m_cutSequence[j][1])
+        int ant1 = m_cutSequence[j][0];
+        int ant2 = m_cutSequence[j][1];
+        // 校正刀(两个天线号相同)不参与测向
+        if (ant1 == ant2)
+        {
+            continue;
+        }
+        // 天线号必须落在理论模板的 1..m_AntennaNum 之内, 否则理论相位差取不到
+        if (ant1 < 1 || ant2 < 1 || ant1 > m_AntennaNum || ant2 > m_AntennaNum)
         {
             continue;
         }
@@ -882,26 +931,51 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
 void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)m_cutSequence.size();
+    if (cutNum <= 0 || m_OneCut_Frams <= 0)
+    {
+        return;
+    }
+    // 入口不变量: dataA 按"每刀 m_OneCut_Frams 帧"排列, 行数必须 >= cutNum*m_OneCut_Frams,
+    // 否则下面 dataA[index] 会读到行数之外。宁可不平滑, 也不能越界读。
+    if ((int)dataA.size() < cutNum * m_OneCut_Frams)
+    {
+        PublicSpace::Log("error: getSmoothData dataA.size()=%d < cutNum*oneCutFrams=%d\n",
+                         (int)dataA.size(), cutNum * m_OneCut_Frams);
+        return;
+    }
+
     vector<SatelliteDataPhaseDiffB> dataB;
     vector<vector<SatelliteDataPhaseDiffA>> oneCutData;
     oneCutData.resize(m_OneCut_Frams);
     vector<vector<SatelliteDataPhaseDiffA>> resultData;
     SatelliteDataPhaseDiffA tpA;
-    vector<SatelliteDataPhaseDiffA> tpA2;
     for (int j = 0; j < cutNum; j++)
     {
         dataB.clear();
-        oneCutData.clear();
-        int index = 0;
+        // ★修正: 原实现在这里 oneCutData.clear()。clear() 会把内层 vector 全部析构
+        // (缓冲释放、size 变 0), 之后 oneCutData[k] = dataA[index] 是往"已析构的
+        // vector 对象"里赋值 —— 内层 vector 已无有效缓冲, 属越界写入同一类问题,
+        // glibc 下表现为 heap-use-after-free / double free。
+        // 这里保持尺寸不变(内层 vector 的 operator= 会自行管理自己的内存)。
+        if ((int)oneCutData.size() != m_OneCut_Frams)
+        {
+            oneCutData.resize(m_OneCut_Frams);
+        }
         for (int k = 0; k < m_OneCut_Frams; k++)
         {
-            index = j * m_OneCut_Frams + k;
+            int index = j * m_OneCut_Frams + k;
             oneCutData[k] = dataA[index];
         }
         int savedDeleteFlag = m_Delete_Prn_Flag;
         m_Delete_Prn_Flag = 0;
         getSatelliteDataPhaseDiffB(oneCutData, dataB);
         m_Delete_Prn_Flag = savedDeleteFlag;
+
+        // ★修正: 本刀结果必须独立成行。原实现的 tpA2 在所有刀之间共用且从不清空,
+        // 第 j 行会累积 0..j 所有刀的卫星, 且靠前卫星携带的是早先刀的旧相位差,
+        // 使"6 条测向基线齐全"这一条件被历史数据凑齐, 产生本不该有的来向角。
+        vector<SatelliteDataPhaseDiffA> tpA2;
+        tpA2.reserve(dataB.size());
         for (unsigned int i = 0; i < dataB.size(); i++)
         {
             calSmoothData(dataB[i], tpA);
@@ -984,6 +1058,14 @@ void SpoofingDoa::getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     vector<vector<SatelliteDataPhaseDiffA>> resultDataA;
     int cutNum = (int)m_cutSequence.size();
+    // 入口不变量: index = (j+1)*m_OneCut_Frams - 1 必须在行数之内
+    if (m_OneCut_Frams <= 0 || cutNum <= 0 ||
+        (int)dataA.size() < cutNum * m_OneCut_Frams)
+    {
+        PublicSpace::Log("error: getEndFramData dataA.size()=%d < cutNum*oneCutFrams=%d\n",
+                         (int)dataA.size(), cutNum * m_OneCut_Frams);
+        return;
+    }
     for (int j = 0; j < cutNum; j++)
     {
         int index = 0;
@@ -1432,12 +1514,27 @@ void SpoofingDoa::setDetectionRecordNum(int num)
 void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA, bool snrFilter)
 {
     dataA.clear();
+    // 条数来自调用方结构体(i_PortOneNum/i_PortTwoNum), 必须夹进数组实际长度
+    // [0, GN902_MAX_PORT_SAT]: 下面的循环直接以它为 data.i_PortOne[]/i_PortTwo[]
+    // 的下标上界, 条数为负或超过数组长度时(调用方填错、或头文件与库版本不一致)
+    // 就会越界读整个 GNSSData, Linux 上直接段错误。
     int size1 = data.i_PortOneNum;
     int size2 = data.i_PortTwoNum;
+    if (size1 < 0 || size1 > GN902_MAX_PORT_SAT)
+    {
+        PublicSpace::Log("warn: i_PortOneNum=%d out of range, clamped\n", size1);
+        size1 = (size1 < 0) ? 0 : GN902_MAX_PORT_SAT;
+    }
+    if (size2 < 0 || size2 > GN902_MAX_PORT_SAT)
+    {
+        PublicSpace::Log("warn: i_PortTwoNum=%d out of range, clamped\n", size2);
+        size2 = (size2 < 0) ? 0 : GN902_MAX_PORT_SAT;
+    }
     int typInt = 0;
     bool flg_E = true;
     vector<int> data2_index;
     data2_index.clear();
+    data2_index.reserve(size2);
     for (int j = 0; j < size2; ++j)
     {
         data2_index.emplace_back(j);
@@ -2100,14 +2197,25 @@ void SpoofingDoa::LogGNSSData(const GNSSData data, int n)
     SatelliteData tp;
     if (0 != m_Save_Original_Flg)
     {
-        PublicSpace::Log("%d-1,i_PortOneNum:%d\n", n, data.i_PortOneNum);
-        for (int i = 0; i < data.i_PortOneNum; i++)
+        // 同 getSatelliteDataPhaseDiffA: 打印循环同样要夹到数组长度, 否则脏条数越界读
+        int size1 = data.i_PortOneNum;
+        int size2 = data.i_PortTwoNum;
+        if (size1 < 0 || size1 > GN902_MAX_PORT_SAT)
+        {
+            size1 = (size1 < 0) ? 0 : GN902_MAX_PORT_SAT;
+        }
+        if (size2 < 0 || size2 > GN902_MAX_PORT_SAT)
+        {
+            size2 = (size2 < 0) ? 0 : GN902_MAX_PORT_SAT;
+        }
+        PublicSpace::Log("%d-1,i_PortOneNum:%d\n", n, size1);
+        for (int i = 0; i < size1; i++)
         {
             tp = data.i_PortOne[i];
             PublicSpace::Log("%d-1,Sys=%d,Type=%d,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);
         }
-        PublicSpace::Log("%d-2,i_PortTwoNum:%d\n", n, data.i_PortTwoNum);
-        for (int i = 0; i < data.i_PortTwoNum; i++)
+        PublicSpace::Log("%d-2,i_PortTwoNum:%d\n", n, size2);
+        for (int i = 0; i < size2; i++)
         {
             tp = data.i_PortTwo[i];
             PublicSpace::Log("%d-2,Sys=%d,Type=%d,Prn=%d,Psr=%.5f,Snr=%.1f,Phase=%.5f,Dop=%.5f\n", n, tp.i_Sys, tp.i_Type, tp.i_Prn, tp.i_Psr, tp.i_Snr, tp.i_Phase, tp.i_Dop);

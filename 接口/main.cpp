@@ -125,6 +125,25 @@ int main902(json jsonData)
 {
 	using namespace gn902test;
 
+	// ---- 0. ABI 自检 ----
+	// 宿主按自己的头文件算出指纹, 与库编译时的指纹比对。不相等说明"头文件与库不是
+	// 同一次构建"(典型: 结构体改了, 但链接/加载的还是旧库), 此时 GetResult_GN902
+	// 会按库的结构体尺寸写宿主的栈对象(栈溢出), 表现为
+	//   *** stack smashing detected ***: terminated
+	// 这种情况下必须用同一份头文件重新编译库, 而不是继续跑。
+	{
+		unsigned int localSig = GN902AbiSignature();
+		unsigned int libSig = GetAbiSignature_GN902();
+		if (localSig != libSig)
+		{
+			printf("[GN902] ABI 不一致: 宿主=%u 库=%u, 请用同一份头文件重新编译库!\n",
+				   localSig, libSig);
+			return 1;
+		}
+		printf("[GN902] ABI 自检通过 (sig=%u, sizeof(SpoofingResult)=%d)\n",
+			   localSig, (int)sizeof(SpoofingResult));
+	}
+
 	// ---- 1. 读取配置 ----
 	std::string datDir, port0File, port1File, debugFile, logFile;
 	if (jsonData.count("datDir"))

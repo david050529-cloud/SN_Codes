@@ -39,6 +39,7 @@
 #include <complex>
 #include <algorithm>
 #include <cstring>
+#include <cstddef>
 #include <random>
 #include <iomanip>
 #include <iostream>
@@ -298,12 +299,16 @@ struct SatelliteData
     int i_SpoofingFlag; // 0=正常，1=欺骗
 };
 
+// 单端口最多卫星条数 = i_PortOne/i_PortTwo 数组长度。
+// 引擎内所有按 i_PortOneNum/i_PortTwoNum 遍历的循环都必须先夹到该范围。
+constexpr int GN902_MAX_PORT_SAT = 500;
+
 struct GNSSData
 {
-    int i_PortOneNum;             // Port1卫星条数
-    SatelliteData i_PortOne[500]; // Port1所有卫星数据
-    int i_PortTwoNum;             // Port2卫星条数
-    SatelliteData i_PortTwo[500]; // Port2所有卫星数据
+    int i_PortOneNum;                            // Port1卫星条数(有效范围 0..GN902_MAX_PORT_SAT)
+    SatelliteData i_PortOne[GN902_MAX_PORT_SAT]; // Port1所有卫星数据
+    int i_PortTwoNum;                            // Port2卫星条数(有效范围 0..GN902_MAX_PORT_SAT)
+    SatelliteData i_PortTwo[GN902_MAX_PORT_SAT]; // Port2所有卫星数据
 };
 
 struct AlarmData
@@ -389,6 +394,56 @@ struct SatelliteDataPhaseDiffB
 };
 
 #pragma pack(pop)
+
+// =============================================================================
+// ABI 自检(编译期)
+// 上面这些结构体是跨 DLL/so 边界的: 宿主在自己的栈上定义 SpoofingResult/GNSSData,
+// 库通过引用往里写(GetResult_GN902 里的 result = it->second->result)。
+// 因此"宿主头文件"与"库头文件"必须是同一次构建的同一份: 只要差一个字节,
+// 库就会按自己的尺寸写穿调用方的栈对象 —— 正是
+//     *** stack smashing detected ***: terminated
+// 的成因(历史上 AlarmData::i_Angle 从 double 改 int、外加 #pragma pack(1)
+// 使 SpoofingResult 由 19208 变 15940 字节，新旧混用即触发)。
+// 下面把尺寸与关键字段偏移钉死: 任何人再改对齐/字段/数组长度，
+// 都会在这里编译期报错，而不是留到运行时崩。
+// =============================================================================
+static_assert(sizeof(SatelliteData) == 44, "ABI 变更: SatelliteData");
+static_assert(sizeof(GNSSData) == 44008, "ABI 变更: GNSSData");
+static_assert(sizeof(AlarmData) == 20, "ABI 变更: AlarmData");
+static_assert(sizeof(SatelliteAngle) == 664, "ABI 变更: SatelliteAngle");
+static_assert(sizeof(SpoofingResult) == 15940, "ABI 变更: SpoofingResult");
+static_assert(sizeof(AlarmMoment) == 668, "ABI 变更: AlarmMoment");
+
+static_assert(offsetof(SatelliteData, i_Psr) == 12, "ABI 变更: SatelliteData::i_Psr");
+static_assert(offsetof(SatelliteData, i_Phase) == 24, "ABI 变更: SatelliteData::i_Phase");
+static_assert(offsetof(GNSSData, i_PortTwoNum) == 22004, "ABI 变更: GNSSData::i_PortTwoNum");
+static_assert(offsetof(AlarmData, i_Angle) == 8, "ABI 变更: AlarmData::i_Angle");
+static_assert(offsetof(AlarmData, i_Quality) == 12, "ABI 变更: AlarmData::i_Quality");
+static_assert(offsetof(SatelliteAngle, i_Angle) == 12, "ABI 变更: SatelliteAngle::i_Angle");
+static_assert(offsetof(SatelliteAngle, i_AlarmData) == 24, "ABI 变更: SatelliteAngle::i_AlarmData");
+static_assert(offsetof(SpoofingResult, i_SatelliteAngle) == 4, "ABI 变更: SpoofingResult::i_SatelliteAngle");
+
+/**
+ * @brief ABI 指纹(由上面各结构体尺寸算出, 编译期常量)。
+ *
+ * 宿主启动时与库导出的 GetAbiSignature_GN902() 比对:
+ *   不相等 ⇒ 正在使用的头文件与实际加载的库不是同一次构建
+ *            (典型: 改了结构体但宿主加载的还是旧 .so/.dll)，必须重新编译库。
+ * 此时若继续调用 GetResult_GN902，库会按自己的结构体尺寸写宿主的栈对象，
+ * 触发 *** stack smashing detected *** 或静默的字段错位。
+ * @return 指纹值
+ */
+inline unsigned int GN902AbiSignature(void)
+{
+    unsigned int s = 0u;
+    s = s * 131u + (unsigned int)sizeof(SatelliteData);
+    s = s * 131u + (unsigned int)sizeof(GNSSData);
+    s = s * 131u + (unsigned int)sizeof(AlarmData);
+    s = s * 131u + (unsigned int)sizeof(SatelliteAngle);
+    s = s * 131u + (unsigned int)sizeof(SpoofingResult);
+    s = s * 131u + (unsigned int)sizeof(AlarmMoment);
+    return s;
+}
 
 // =============================================================================
 // SpoofingDoa 主类

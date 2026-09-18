@@ -17,9 +17,18 @@ using namespace std;
 // GN902Container 的定义在 GN902.cpp 中，这里只 extern 声明（已在头文件中声明）
 // 不要重复定义！
 
-// 获取版本号 
+// 获取版本号
 char* GetALGVersion(){
 	return Version;
+}
+
+// ABI 自检: 返回本库编译时各跨边界结构体的尺寸指纹。
+// 宿主用 GN902AbiSignature()(见 GN902.h) 与本函数比对, 不相等即说明
+// 头文件与库不是同一次构建(典型: 改了结构体但加载的还是旧库), 必须重编。
+// 此时若继续运行, GetResult_GN902 会按库的结构体尺寸写宿主的栈对象,
+// 触发 *** stack smashing detected *** (或静默的字段错位)。
+unsigned int GetAbiSignature_GN902(){
+	return GN902AbiSignature();
 }
 
 // 创建GN902对象

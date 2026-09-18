@@ -31,6 +31,12 @@ GN902_EXTERN_C int SetData_GN902(int id, const GNSSData* data,
 
 GN902_EXTERN_C int GetResult_GN902(int id, SpoofingResult& result);
 
+// ABI 自检: 返回本库编译时各跨边界结构体的尺寸指纹(见 GN902.h 的 GN902AbiSignature)。
+// 宿主按自己的头文件算 GN902AbiSignature() 与本函数比对, 不相等即说明
+// "头文件与库不是同一次构建", 必须重新编译库再运行 —— 否则 GetResult_GN902
+// 会按库的结构体尺寸写宿主的栈对象, 触发 *** stack smashing detected ***。
+GN902_EXTERN_C unsigned int GetAbiSignature_GN902();
+
 GN902_EXTERN_C int Release_GN902(int id);
 
 #endif
