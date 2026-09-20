@@ -56,8 +56,9 @@ int main()
 //                       GetResult_GN902 的返回值快照，与 logFile 完全分离。
 //   "switchSeconds"   : 每刀保留末尾稳定秒数（默认 1，与 Python 流程对齐）
 //   可选阈值覆盖（不设则用引擎默认，与 Python 硬编码阈值一致）:
-//   "phsDiffThreshold" / "satelliteCountThreshold" / "cutCountThreshold" /
-//   "sysEnum" / "typeEnum"
+//   "phsDiffThreshold" / "satelliteCountThreshold" / "sysEnum" / "typeEnum"
+//   "cutCountThreshold": 连续切刀数(连续报警确认次数)，由 SetCutnumThreshold_GN902
+//                        接口单独传入(不再走 txt 配置文件)
 // =============================================================================
 
 // 同时输出到命令行与日志文件。
@@ -480,13 +481,21 @@ int main902(json jsonData)
 	{
 		double phsTh = jsonData["phsDiffThreshold"].get<double>();
 		double satTh = jsonData["satelliteCountThreshold"].get<double>();
-		double cutTh = jsonData.count("cutCountThreshold") ? jsonData["cutCountThreshold"].get<double>() : 0.0;
 		int sys = jsonData.count("sysEnum") ? jsonData["sysEnum"].get<int>() : -1;
 		int type = jsonData.count("typeEnum") ? jsonData["typeEnum"].get<int>() : -1;
 		// ret = SetThresholdDetection_GN902(id, phsTh, satTh, cutTh, sys, type);
 		ret = SetThresholdDetection_GN902(id, satTh, phsTh, sys, type);
 		if (ret != 0)
 			gn902LogLine(logFp, "[GN902] SetThresholdDetection_GN902 失败 ret=%d\n", ret);
+	}
+
+	// 连续切刀数(连续报警确认次数): 由接口传入(>0 时生效)，不设则用引擎默认值
+	if (jsonData.count("cutCountThreshold"))
+	{
+		int cutTh = jsonData["cutCountThreshold"].get<int>();
+		ret = SetCutnumThreshold_GN902(id, cutTh);
+		if (ret != 0)
+			gn902LogLine(logFp, "[GN902] SetCutnumThreshold_GN902 失败 ret=%d\n", ret);
 	}
 
 	// ---- 8. 流式喂入 ----

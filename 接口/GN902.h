@@ -712,11 +712,18 @@ public:
      * @brief 设置欺骗检测阈值
      * @param phsDiffThreshold       位相差检测阈值(度)
      * @param satelliteCountThreshold 卫星数阈值(相位差聚簇的最小卫星数)
-     * @param cutCountThreshold       连续确认刀数(>0 时生效, 对应连续报警确认次数)
      * @param sysEnum                 卫星系统编码
      * @param typeEnum                频点编码
      */
     void SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, int sysEnum, int typeEnum);
+
+    /**
+     * @brief 设置连续切刀数(连续报警确认次数)
+     * @param thresholdCount 连续报警确认次数(>0 时生效, 对应引擎 m_Detection_Recodds_Num)
+     * @note 由 SetCutnumThreshold_GN902 接口调用, 覆盖引擎默认值(2);
+     *       不再从 txt 配置文件读取。
+     */
+    void SetCutnumThreshold(int thresholdCount);
 
     /**
      * @brief 流式喂入一帧数据

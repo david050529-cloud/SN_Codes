@@ -18,10 +18,10 @@
 //   - 未读到配置文件 -> 默认不打印独立日志;
 //   - 日志文件路径也写在配置文件里(可自定义命名)。
 //
-// 新增: cutCountThreshold (连续报警确认刀数, 对应引擎 m_Detection_Recodds_Num)
-//   - 通过 txt 配置文件 cut_count_threshold 键传入;
-//   - 取值 1..10; 不写或写 -1 时使用引擎默认值(2);
-//   - 在 GN902 实例构造、加载 txt 配置后立即应用。
+// 新增: cutCountThreshold (连续切刀数, 对应引擎 m_Detection_Recodds_Num)
+//   - 改为通过接口 SetCutnumThreshold_GN902 传入(GN902::SetCutnumThreshold);
+//   - 取值 1..10; 不设置(<=0)时使用引擎默认值(2);
+//   - 不再从 txt 配置文件读取。
 // =============================================================================
 #include "GN902.h"
 #include <cctype>      // 新增: std::tolower
@@ -2178,8 +2178,8 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<
 //   - 与 PublicSpace::Log 完全分离，使用独立的文件句柄与独立命名；
 //   - 由外部 .txt 配置文件控制开关；未读到配置文件则默认不打印；
 //   - 日志文件路径由配置文件 log_path 指定，可自定义命名；
-//   - ★ 新增 ★ cutCountThreshold：连续报警确认刀数(对应引擎 m_Detection_Recodds_Num)，
-//     也由同一 txt 配置文件 cut_count_threshold 键传入。
+//   - 注意: 连续切刀数 cutCountThreshold(对应引擎 m_Detection_Recodds_Num)已改为
+//     通过接口 SetCutnumThreshold_GN902 传入, 不再由本配置文件读取。
 //
 // 配置文件按以下顺序查找(第一个可读文件生效)：
 //     1) 环境变量 GN902_CONFIG 指定的路径
@@ -2192,8 +2192,6 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<
 //     log_enable=1
 //     # 独立日志文件路径(相对/绝对路径, 需带文件名)
 //     log_path=./logs/gn902_doa.log
-//     # ★ 连续报警确认刀数(1..10)，不写或写 -1 时使用引擎默认值(2)
-//     cut_count_threshold=2
 // =============================================================================
 namespace {
 
@@ -2202,13 +2200,11 @@ struct GN902RuntimeConfig
     bool        logEnable;          // 独立日志开关 (默认 false)
     std::string logPath;            // 独立日志文件路径(含文件名)
     std::string cfgPath;            // 实际加载到的配置文件路径 (""=未找到)
-    int         cutCountThreshold;  // ★ 连续报警确认刀数(1..10); -1=不修改引擎默认值
 
     GN902RuntimeConfig()
         : logEnable(false),
           logPath("./gn902_debug.log"),
-          cfgPath(""),
-          cutCountThreshold(-1) {}
+          cfgPath("") {}
 };
 
 GN902RuntimeConfig g_gn902Cfg;
@@ -2283,31 +2279,6 @@ bool gn902ParseConfigFile(const std::string &path, GN902RuntimeConfig &cfg)
                     cfg.logPath = val;
                 }
             }
-            // ★ 新增: 连续报警确认刀数(1..10)。不在此范围则忽略, 保持引擎默认值。
-            else if (key == "cut_count_threshold" ||
-                     key == "cutcountthreshold"   ||
-                     key == "cut_count"           ||
-                     key == "cutcount")
-            {
-                try
-                {
-                    int v = std::stoi(val);
-                    if (v >= 1 && v <= 10)
-                    {
-                        cfg.cutCountThreshold = v;
-                    }
-                    else
-                    {
-                        std::cerr << "[GN902] cut_count_threshold 超出范围(1..10), 忽略: "
-                                  << v << std::endl;
-                    }
-                }
-                catch (const std::exception &)
-                {
-                    std::cerr << "[GN902] cut_count_threshold 解析失败, 忽略: "
-                              << val << std::endl;
-                }
-            }
         }
         return true;
     }
@@ -2327,11 +2298,10 @@ void gn902LoadConfig()
     }
     g_gn902CfgLoaded = true;
 
-    // 默认值: 不打印独立日志, 不覆盖引擎默认 cutCountThreshold
+    // 默认值: 不打印独立日志
     g_gn902Cfg.logEnable = false;
     g_gn902Cfg.logPath   = "./gn902_debug.log";
     g_gn902Cfg.cfgPath   = "";
-    g_gn902Cfg.cutCountThreshold = -1;
 
     // 1) 环境变量优先
     const char *envCfg = std::getenv("GN902_CONFIG");
@@ -2520,13 +2490,9 @@ GN902::GN902(){
     // ★ 加载独立日志配置(懒加载, 只执行一次)
     gn902LoadConfig();
 
-    // ★ 应用 txt 配置中的 cutCountThreshold(连续报警确认刀数) ★
-    //   - 未配置或配置无效 (-1) 时, 引擎保持自身默认值(m_Detection_Recodds_Num=2);
-    //   - 配置 1..10 时, 通过 setDetectionRecordNum 覆盖引擎默认值。
-    if (st->eng != 0 && g_gn902Cfg.cutCountThreshold > 0)
-    {
-        st->eng->setDetectionRecordNum(g_gn902Cfg.cutCountThreshold);
-    }
+    // 注意: 连续切刀数 cutCountThreshold 已改为由接口 SetCutnumThreshold_GN902 传入
+    //       (见 GN902::SetCutnumThreshold)，此处不再从 txt 配置读取。
+    //       未调用该接口时, 引擎保持自身默认值(m_Detection_Recodds_Num=2)。
 
     if (g_gn902Cfg.cfgPath.empty())
     {
@@ -2537,24 +2503,14 @@ GN902::GN902(){
         std::cout << "[GN902] 已加载配置: " << g_gn902Cfg.cfgPath
                   << " | 独立日志=" << (g_gn902Cfg.logEnable ? "开启" : "关闭")
                   << " | 路径=" << g_gn902Cfg.logPath
-                  << " | cutCountThreshold=";
-        if (g_gn902Cfg.cutCountThreshold > 0)
-        {
-            std::cout << g_gn902Cfg.cutCountThreshold;
-        }
-        else
-        {
-            std::cout << "(引擎默认)";
-        }
-        std::cout << std::endl;
+                  << std::endl;
     }
 
     // ★ 首次写入独立日志(若开启)，标记实例创建
-    GN902Log("=== GN902 实例创建: cfg=%s logEnable=%d logPath=%s cutCountThreshold=%d ===\n",
+    GN902Log("=== GN902 实例创建: cfg=%s logEnable=%d logPath=%s ===\n",
              g_gn902Cfg.cfgPath.empty() ? "(未找到)" : g_gn902Cfg.cfgPath.c_str(),
              (int)g_gn902Cfg.logEnable,
-             g_gn902Cfg.logPath.c_str(),
-             g_gn902Cfg.cutCountThreshold);
+             g_gn902Cfg.logPath.c_str());
 }
 
 GN902::~GN902(){
@@ -2582,12 +2538,26 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     // 参数顺序: (系统sysEnum, 频点typeEnum, 卫星数阈值satelliteCountThreshold, 相位差阈值phsDiffThreshold)
     eng->setThresholdDetectionDoa(sysEnum, typeEnum, (int)satelliteCountThreshold, phsDiffThreshold);
 
-    // 注意: 连续报警确认刀数 cutCountThreshold 不再由本接口传入。
-    //       它统一由 GN902 实例构造时从 txt 配置文件(键: cut_count_threshold)读取,
-    //       在 GN902::GN902() 中通过 setDetectionRecordNum() 应用(见本文件上方)。
+    // 注意: 连续切刀数 cutCountThreshold 不由本接口传入, 见 GN902::SetCutnumThreshold。
     GN902Log("SetThresholdDetection: sys=%d type=%d phsDiff=%.3f satCount=%.3f ",
              sysEnum, typeEnum, phsDiffThreshold, satelliteCountThreshold);
     return;
+}
+
+// 设置连续切刀数(连续报警确认次数)
+// @param thresholdCount 连续报警确认次数; >0 时生效(对应引擎 m_Detection_Recodds_Num),
+//                       超出 1..10 的范围时按 1 处理(见 setDetectionRecordNum)
+void GN902::SetCutnumThreshold(int thresholdCount){
+    std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
+    if (it == g_gn902State.end() || it->second->eng == 0)
+    {
+        return;
+    }
+    if (thresholdCount > 0)
+    {
+        it->second->eng->setDetectionRecordNum(thresholdCount);
+    }
+    GN902Log("SetCutnumThreshold: cutCountThreshold=%d\n", thresholdCount);
 }
 
 // 设置数据

@@ -7,9 +7,9 @@
 
 // #define DOA_DEBUG
 #ifdef _WIN32
- char Version[] = "V1.0.1";
+ char Version[] = "V1.0.2";
 #else
- char Version[] = "V1.0.1";
+ char Version[] = "V1.0.2";
 #endif
 
 using namespace std;
@@ -68,6 +68,16 @@ int SetThresholdDetection_GN902(int id,
     GN902* p = GN902Container[id];
     p->SetThresholdDetection(phsDiffThreshold, satelliteCountThreshold,
                              sysEnum, typeEnum);
+    return 0;
+}
+
+// 设置连续切刀数(连续报警确认次数)
+int SetCutnumThreshold_GN902(int id, int thresholdCount){
+    if(id < 0 || id >= (int)GN902Container.size() || !GN902Container[id]){
+        return 1;
+    }
+    GN902* p = GN902Container[id];
+    p->SetCutnumThreshold(thresholdCount);
     return 0;
 }
 
