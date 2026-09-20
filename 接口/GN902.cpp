@@ -2657,8 +2657,6 @@ GN902::~GN902(){
 // 设置阈值检测参数
 // @param phsDiffThreshold 位相差阈值(度, 有效范围 0~360)
 // @param satelliteCountThreshold 卫星数阈值(有效范围 0~GN902_MAX_PORT_SAT)
-// @param phsDiffThreshold 位相差阈值(度, 有效范围 0~360)
-// @param satelliteCountThreshold 卫星数阈值(有效范围 0~GN902_MAX_PORT_SAT)
 // @param sysEnum 系统类型
 // @param typeEnum 类型
 void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, int sysEnum, int typeEnum){
@@ -2689,36 +2687,11 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
         return;
     }
 
-
-    // ★ 参数合法性校验
-    //   目的: 过滤调用方传入的无效值(未初始化变量 / 参数顺序写反 / 头文件与库 ABI
-    //         不一致导致 double 位模式被误解释)。这些垃圾值一旦进入引擎就会污染
-    //         阈值, 并让日志打印出 "203747...49216.000" 这样的超长数字。
-    //   合法范围: 相位差阈值 0~360 度, 卫星数阈值 0~GN902_MAX_PORT_SAT。
-    if (!std::isfinite(phsDiffThreshold) || phsDiffThreshold < 0.0 || phsDiffThreshold > 360.0)
-    {
-        GN902Log("SetThresholdDetection: INVALID phsDiff=%.3g (out of [0,360]), ignored. "
-                 "sys=%d type=%d satCount=%.3g\n",
-                 phsDiffThreshold, sysEnum, typeEnum, satelliteCountThreshold);
-        return;
-    }
-    if (!std::isfinite(satelliteCountThreshold) || satelliteCountThreshold < 0.0 ||
-        satelliteCountThreshold > (double)GN902_MAX_PORT_SAT)
-    {
-        GN902Log("SetThresholdDetection: INVALID satCount=%.3g (out of [0,%d]), ignored. "
-                 "sys=%d type=%d phsDiff=%.3g\n",
-                 satelliteCountThreshold, GN902_MAX_PORT_SAT, sysEnum, typeEnum, phsDiffThreshold);
-        return;
-    }
-
     SpoofingDoa *eng = it->second->eng;
     // 参数顺序: (系统sysEnum, 频点typeEnum, 卫星数阈值satelliteCountThreshold, 相位差阈值phsDiffThreshold)
     eng->setThresholdDetectionDoa(sysEnum, typeEnum, (int)satelliteCountThreshold, phsDiffThreshold);
 
     // 注意: 连续切刀数 cutCountThreshold 不由本接口传入, 见 GN902::SetCutnumThreshold。
-    // ★ 末尾补 '\n': 原来用空格结尾, 多条日志会粘在同一行, 看起来像一条超长日志。
-    // ★ 用 %.3g 代替 %.3f: 配合上面的校验, 正常值打印不受影响; 即使异常大也不会打印几百位数字。
-    GN902Log("SetThresholdDetection: sys=%d type=%d phsDiff=%.3g satCount=%.3g\n",
     // ★ 末尾补 '\n': 原来用空格结尾, 多条日志会粘在同一行, 看起来像一条超长日志。
     // ★ 用 %.3g 代替 %.3f: 配合上面的校验, 正常值打印不受影响; 即使异常大也不会打印几百位数字。
     GN902Log("SetThresholdDetection: sys=%d type=%d phsDiff=%.3g satCount=%.3g\n",
@@ -2739,7 +2712,6 @@ void GN902::SetCutnumThreshold(int thresholdCount){
     {
         it->second->eng->setDetectionRecordNum(thresholdCount);
     }
-    // ★ 末尾补 '\n', 避免与下一条日志粘行
     // ★ 末尾补 '\n', 避免与下一条日志粘行
     GN902Log("SetCutnumThreshold: cutCountThreshold=%d\n", thresholdCount);
 }
@@ -2894,14 +2866,23 @@ void GN902::Detect(){
     {
         st->calFrames = calNew;
     }
+    // 从未收到过校正刀({7,7}, 兼容旧约定 {1,1}) 时不再整轮丢弃:
+    // 存一帧全零 GNSSData(0 星)充当校正行, 让本轮照常组批。
+    //   引擎侧影响: setCorrectionData 找到的校正刀没有任何卫星 -> calCorrectionOffset
+    //   收不到样本 -> m_CorrectionData 保持不变, 等价于本轮不做通道校正。
+    //   相位差因此少了一个常量平移, 但该平移对同频所有卫星一致, 不影响相位差聚簇
+    //   检测 -> 报警与测向照常给出(测向角度带一个常量偏移)。
+    // 之所以要把这帧存进 calFrames 而不是用局部变量: 下面组批的 else 分支会退回到
+    // calRow = st->calFrames 并取 calRow.back(), 空 vector 取 back() 是未定义行为。
+    // 设备上校正刀几十轮才来一次, 若在这里直接 return, 开机后到第一把校正刀之间
+    // 的所有轮都静默无结果; 若设备根本不发校正刀, 则永远无结果。
     if (st->calFrames.empty())
     {
-        // 从未收到过校正刀({7,7}, 兼容旧约定 {1,1}) -> 无校正数据可用, 无法组批。
-        // 六测向刀现在已能独立触发轮边界, 因此这里比"以校正刀为边界"时更容易走到,
-        // 一旦走到就是"六刀到齐但一直没有结果"的根因, 必须留痕。
-        GN902Log("Detect: SKIP - 无校正刀数据(calFrames empty), 本轮帧数=%d\n",
-                 (int)frameCuts.size());
-        return;
+        GNSSData noCal;
+        memset(&noCal, 0, sizeof(noCal));
+        st->calFrames.push_back(noCal);
+        GN902Log("Detect: 无校正刀数据(calFrames empty) -> 用全零帧充当校正行, "
+                 "本轮不做通道校正。本轮帧数=%d\n", (int)frameCuts.size());
     }
 
     // 测向轮缺刀不再整轮丢弃：缺失的测向刀用空帧补齐
