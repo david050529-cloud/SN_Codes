@@ -716,7 +716,7 @@ public:
      * @param sysEnum                 卫星系统编码
      * @param typeEnum                频点编码
      */
-    void SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, double cutCountThreshold, int sysEnum, int typeEnum);
+    void SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, int sysEnum, int typeEnum);
 
     /**
      * @brief 流式喂入一帧数据

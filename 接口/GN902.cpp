@@ -12,8 +12,19 @@
 //   接口实现   GN902.cpp (GN902 类: 实例状态机 + 整轮帧缓冲 + 检测/测向调度)
 //
 // 所有类型与类声明见配套头文件 GN902.h。
+//
+// 新增: GN902 独立日志(与 PublicSpace::Log 分离)。
+//   - 由外部 .txt 配置文件控制开关;
+//   - 未读到配置文件 -> 默认不打印独立日志;
+//   - 日志文件路径也写在配置文件里(可自定义命名)。
+//
+// 新增: cutCountThreshold (连续报警确认刀数, 对应引擎 m_Detection_Recodds_Num)
+//   - 通过 txt 配置文件 cut_count_threshold 键传入;
+//   - 取值 1..10; 不写或写 -1 时使用引擎默认值(2);
+//   - 在 GN902 实例构造、加载 txt 配置后立即应用。
 // =============================================================================
 #include "GN902.h"
+#include <cctype>      // 新增: std::tolower
 
 using namespace std;
 
@@ -96,9 +107,6 @@ namespace PublicSpace
     }
 
     // printf 格式检查(GCC/Clang): 让编译器在编译期核对可变参数与格式串是否匹配。
-    // 没有它, 类型不匹配(例如 int 字段用 %.1f 打印)不会报错, 只会静默输出错位值/垃圾值:
-    // AlarmData::i_Angle 由 double 改成 int 后, 本文件与 main.cpp 各踩过一次
-    // (Angle 列打印出质量分、Quality 列打印出寄存器残留)。
 #if defined(__GNUC__) || defined(__clang__)
     void Log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 #else
@@ -263,11 +271,6 @@ void ArithmeticDoa::calPseudoByInterfer(const vector<vector<double>> phaseTheory
 
 /**
  * @brief 相关干涉仪测向: 在搜索角度范围内, 用理论相位差与实际相位差做相关匹配
- * @param phaseTheory 理论相位差模板 [角度][阵元]
- * @param data        实测信息(天线对、相位差、搜索范围)
- * @param angle       输出: 最匹配的来波角度(度)
- * @param quality     输出: 测向质量(0-100)
- * @param diff2       输出: 各角度相关度伪谱
  */
 void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const InterferInfo data, double &angle, double &quality, vector<double> &diff2)
 {
@@ -276,8 +279,6 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
     int startAngle = (int)data.i_Start;
     int endAngle = (int)data.i_End;
     int size = data.i_Phase_Len;
-    // 越界防护: i_Phase_Len/i_AntennaSq/i_Phase_Diff 是调用方填进来的,
-    // 条数超过数组长度 200 时下面的 data.i_AntennaSq[i] 会越界读。
     if (size > 200)
     {
         size = 200;
@@ -296,8 +297,6 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
     {
         double sumDiff = 0.0;
         tp_ang = Round360(ang);
-        // 越界防护: phaseTheory 是 [角度][阵元] 模板, 有效角度数由模板行数决定,
-        // 模板缺失(该频点未建模板)时直接跳过该角度, 不再读 phaseTheory[tp_ang]。
         if (tp_ang < 0 || tp_ang >= (int)phaseTheory.size())
         {
             continue;
@@ -306,8 +305,6 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
         {
             int antn1 = data.i_AntennaSq[i][0];
             int antn2 = data.i_AntennaSq[i][1];
-            // 越界防护: 天线号由调用方填入, 必须落在 1..阵元数 内,
-            // 否则 phaseTheory[tp_ang][antn-1] 会读到模板行之外。
             if (antn1 < 1 || antn2 < 1 ||
                 antn1 > (int)phaseTheory[tp_ang].size() ||
                 antn2 > (int)phaseTheory[tp_ang].size())
@@ -327,9 +324,6 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
     }
 
     angle = Round360(ang_val);
-    // 与 Python correlative_doa 对齐: quality = (corr + 1)/2 * 100,
-    // 其中 corr = max(sum cos)/size。原 getDoaMass 采用伪谱归一化相关口径,
-    // 与 Python 的 (best_corr+1)/2*100 不一致, 导致质量分与角度置信度不符。
     if (size > 0)
     {
         quality = (max_val / size + 1.0) / 2.0 * 100.0;
@@ -346,10 +340,6 @@ void ArithmeticDoa::calInterfer(const vector<vector<double>> phaseTheory, const 
 
 /**
  * @brief 计算均匀圆阵的理论相位差模板
- * @param f         载波频率(Hz)
- * @param r         阵列半径(米)
- * @param antnnaNum 阵元数量
- * @param theory    输出: 理论相位差模板 [360角度][阵元](弧度)
  */
 void ArithmeticDoa::calPhaseTheory(const double f, const double r, const int antnnaNum, std::vector<std::vector<double>> &theory)
 {
@@ -425,16 +415,11 @@ double ArithmeticDoa::getDoaMass(const vector<double> diffTheory, const vector<d
 // == 原 SpoofingDoa.cpp —— 核心引擎实现 =================================================
 // =============================================================================
 
-// 欺骗测向算法对象构造函数
-/**
- * @brief 构造函数: 初始化引擎并设置各系统频点的默认欺骗检测阈值
- * @note 对 GPS/GLONASS/Galileo/BDS 各频点调用 setThresholdDetectionDoa 设置默认阈值
- */
 SpoofingDoa::SpoofingDoa(void){
     Init();
     setThresholdDetectionDoa(0, 2, 3, -1);    // GPS L5
-    setThresholdDetectionDoa(1, 0, 2, 5.0);   // GLONASS G1
-    setThresholdDetectionDoa(1, 1, 3, 5.0);   // GLONASS G2
+    setThresholdDetectionDoa(1, 0, 2, 30.0);   // GLONASS G1
+    setThresholdDetectionDoa(1, 1, 3, 30.0);   // GLONASS G2
     setThresholdDetectionDoa(3, 2, 3, 5.0);   // Galileo E1C
     setThresholdDetectionDoa(3, 12, 3, 5.0);  // Galileo E5a
     setThresholdDetectionDoa(3, 17, 3, 5.0);  // Galileo E5b
@@ -446,11 +431,6 @@ SpoofingDoa::SpoofingDoa(void){
     setThresholdDetectionDoa(4, 34, 3, 5.0);  // BDS B1X
 }
 
-/**
- * @brief 初始化引擎全部运行状态
- * @note 主要完成: 清空历史结果 → 设置阵列/切刀/检测等默认参数 → 建立频率表(initType)
- *       → 初始化各频点检测阈值 → 建立相关干涉仪理论模板(initTheory)
- */
 void SpoofingDoa::Init(void){
 
     m_CorrectionData.clear();
@@ -463,7 +443,7 @@ void SpoofingDoa::Init(void){
     m_AntennaNum = 7;
     m_omni_R = 0.1865;
 
-    m_cutSequence = { {1,1}, {1,2}, {1,3}, {1,4}, {1,5}, {1,6}, {1,7} };
+    m_cutSequence = { {7,7}, {1,2}, {1,3}, {1,4}, {1,5}, {1,6}, {1,7} };
 
     m_OneCut_Frams = 8;
     m_Smooth_Flag = 1;
@@ -499,11 +479,6 @@ SpoofingDoa::~SpoofingDoa(void)
 {
 }
 
-/**
- * @brief 喂入一批 GNSS 原始数据并触发检测/测向
- * @param data    GNSS 数据数组(按切刀序列排列)
- * @param dataLen 数据条数(切刀数量)
- */
 void SpoofingDoa::setGNSSData(const GNSSData *data, int dataLen)
 {
     int cutNum = (int)m_cutSequence.size();
@@ -520,8 +495,6 @@ void SpoofingDoa::setGNSSData(const GNSSData *data, int dataLen)
 
 void SpoofingDoa::collectPhaseDiffData(const GNSSData &data, std::vector<SatelliteDataPhaseDiffA> &dataA)
 {
-    // 固定基线原始相位差采集: 不按载噪比过滤(保留所有两端口同时出现的卫星)、
-    // 不做通道校正、不进入检测/测向。仅提取两端口同名卫星的载波相位差(小数部分)。
     vector<SatelliteDataPhaseDiffA> raw;
     getSatelliteDataPhaseDiffA(data, raw, false);
     dataA.clear();
@@ -529,17 +502,12 @@ void SpoofingDoa::collectPhaseDiffData(const GNSSData &data, std::vector<Satelli
     {
         if (raw[i].i_phase_diff < 0)
         {
-            continue; // 仅单端口出现的卫星, 无相位差, 跳过
+            continue;
         }
         dataA.emplace_back(raw[i]);
     }
 }
 
-/**
- * @brief 取出最近一轮的测向/报警结果
- * @param result 输出结果(含各频点报警角度、卫星明细)
- * @return 0=成功
- */
 int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
 {
     setSpoofingResult(result);
@@ -552,12 +520,6 @@ int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
 void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
 {
     int count = 0;
-    // 实时输出当前轮测向结果：遍历已跟踪频点，有测向结果才输出角度，
-    // 否则来向角度输出 -1；不再把历史(上一轮)的测向结果回填到当前轮。
-    //
-    // 但"被欺骗卫星数"是报警频点自身的属性，不是测向结果的属性：只要该频点已确认
-    // 报警(在 m_Tracking 中)，就按其跟踪到的欺骗卫星簇(cluster_sats)输出卫星明细；
-    // 本轮没测出角度的卫星, 其 Angle/Quality 记 -1，不把整块明细丢掉(count=0)。
     for (auto &kv : m_Tracking)
     {
         if (count >= 24)
@@ -572,7 +534,6 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
         result.i_SatelliteAngle[count].i_Type = typeInt % 100;
         result.i_SatelliteAngle[count].i_Alarm = 1;
 
-        // 被欺骗卫星集合 = 跟踪到的欺骗卫星簇；跟踪簇为空时回退到本轮测向卫星。
         std::set<int> sats = t.cluster_sats;
         if (sats.empty() && it != m_AngleResultData.end())
         {
@@ -616,7 +577,6 @@ void SpoofingDoa::setSpoofingResult(SpoofingResult &result)
 
         if (doas.empty())
         {
-            // 本轮没有任何一颗卫星测出角度 → 来向角度 -1，但卫星明细照常给出
             result.i_SatelliteAngle[count].i_Angle = -1;
         }
         else
@@ -671,13 +631,6 @@ double SpoofingDoa::getSatMaxSnr(int typeInt, int prn)
     return snr;
 }
 
-/**
- * @brief 测向主流程: 接收整轮切刀数据, 依次完成相位差计算→平滑→校正→欺骗检测→测向
- * @param data    切刀数据数组(每项对应一个切刀位置)
- * @param dataLen 切刀数量
- * @note 流程: getSatelliteDataPhaseDiffA 提取相位差 → (可选)平滑 → 通道校正 →
- *       循环切刀检测(累积跨轮基线) → 相关干涉仪测向 → 更新跟踪状态
- */
 void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
 {
     string nowT = getNowTime();
@@ -692,9 +645,6 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
         vector<SatelliteDataPhaseDiffA> tp;
         tp.clear();
         vector<SatelliteDataPhaseDiffA>().swap(tp);
-        // 校正刀(自校准 {1,1})不按载噪比过滤: 与 Python compute_calibration 一致,
-        // 用全部匹配卫星(含低载噪比)计算通道校正偏移; 否则低载噪比卫星被剔除会使
-        // 校正偏移整体漂移(可达上百度), 导致测向角度错位。测向刀仍按载噪比过滤。
         bool isCalCut = (i < (int)m_cutSequence.size() && m_cutSequence[i][0] == m_cutSequence[i][1]);
         getSatelliteDataPhaseDiffA(data[i], tp, !isCalCut);
         dataA.emplace_back(tp);
@@ -736,10 +686,6 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
 
     vector<SatelliteDataPhaseDiffB> dataB;
     dataB.clear();
-    // 测向数据放宽口径: 不要求卫星在全部 7 刀(含校正刀)都出现, 只要求 6 条测向
-    // 基线齐全(由 calAngleUseAntenna 的 m_Doa_Cut_min_Num 把关), 与 Python
-    // run_doa_one 只要求 6 个测向 code(9/57/17/25/33/1) 一致。否则缺失校正刀
-    // 的卫星会被整体丢弃, 导致报警频点/卫星数偏少(如 B2b 整点缺失)。
     int savedDeletePrnFlag = m_Delete_Prn_Flag;
     m_Delete_Prn_Flag = 0;
     getSatelliteDataPhaseDiffB(dataA, dataB);
@@ -796,10 +742,6 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
     }
 }
 
-/**
- * @brief 对每个频点的可疑卫星做相关干涉仪测向, 汇总报警结果
- * @param inferInfoData 各频点各星的测向输入信息(天线对、相位差、搜索范围)
- */
 void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoData)
 {
     m_AngleResultData.clear();
@@ -853,20 +795,9 @@ void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoD
     }
 }
 
-/**
- * @brief 从一条基线数据提取测向所需的天线对与相位差, 填入 InterferInfo
- * @param dataB  单星各切刀相位差数据
- * @param info   输出: 测向输入信息(天线对/相位差/条数)
- * @param doaFlg 输出: 1=有效(切刀数足够), 0=无效(切刀数不足)
- */
 void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, InterferInfo &info, int &doaFlg)
 {
     doaFlg = 1;
-    // 越界防护(两道):
-    //   1) i_Snr1/i_Snr2/i_phase_diff 是长度 100 的数组, diffLen 必须夹到 100;
-    //   2) m_cutSequence 只有一轮切刀数(7)项, 而 diffLen 是"一轮内的行数"。
-    // 原实现直接用 m_cutSequence[j], 一旦行数超过切刀表长度就是读 vector 之外
-    // (未定义行为), 取到的垃圾天线号再被 calInterfer 拿去索引 phaseTheory。
     int diffLen = dataB.i_diffLen;
     if (diffLen < 0)
     {
@@ -894,12 +825,10 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
         }
         int ant1 = m_cutSequence[j][0];
         int ant2 = m_cutSequence[j][1];
-        // 校正刀(两个天线号相同)不参与测向
         if (ant1 == ant2)
         {
             continue;
         }
-        // 天线号必须落在理论模板的 1..m_AntennaNum 之内, 否则理论相位差取不到
         if (ant1 < 1 || ant2 < 1 || ant1 > m_AntennaNum || ant2 > m_AntennaNum)
         {
             continue;
@@ -922,9 +851,6 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
         doaFlg = 0;
         return;
     }
-    // 与 Python correlative_doa 对齐: 仅使用 6 条测向基线(参考天线1 到 天线2..7)，
-    // 不做 setUseAntennaAndPhaseAll 天线对传递扩展。扩展会引入半周歧义(180° 翻转)，
-    // 使同一卫星在不同测向轮之间角度来回跳变(如 352°↔172°)。
     int size = (int)tp_diff.size();
     int prn = dataB.i_Prn;
     int typeInt = TypeInt(dataB.i_Sys, dataB.i_Type);
@@ -945,8 +871,6 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
     {
         return;
     }
-    // 入口不变量: dataA 按"每刀 m_OneCut_Frams 帧"排列, 行数必须 >= cutNum*m_OneCut_Frams,
-    // 否则下面 dataA[index] 会读到行数之外。宁可不平滑, 也不能越界读。
     if ((int)dataA.size() < cutNum * m_OneCut_Frams)
     {
         PublicSpace::Log("error: getSmoothData dataA.size()=%d < cutNum*oneCutFrams=%d\n",
@@ -962,11 +886,6 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
     for (int j = 0; j < cutNum; j++)
     {
         dataB.clear();
-        // ★修正: 原实现在这里 oneCutData.clear()。clear() 会把内层 vector 全部析构
-        // (缓冲释放、size 变 0), 之后 oneCutData[k] = dataA[index] 是往"已析构的
-        // vector 对象"里赋值 —— 内层 vector 已无有效缓冲, 属越界写入同一类问题,
-        // glibc 下表现为 heap-use-after-free / double free。
-        // 这里保持尺寸不变(内层 vector 的 operator= 会自行管理自己的内存)。
         if ((int)oneCutData.size() != m_OneCut_Frams)
         {
             oneCutData.resize(m_OneCut_Frams);
@@ -981,9 +900,6 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
         getSatelliteDataPhaseDiffB(oneCutData, dataB);
         m_Delete_Prn_Flag = savedDeleteFlag;
 
-        // ★修正: 本刀结果必须独立成行。原实现的 tpA2 在所有刀之间共用且从不清空,
-        // 第 j 行会累积 0..j 所有刀的卫星, 且靠前卫星携带的是早先刀的旧相位差,
-        // 使"6 条测向基线齐全"这一条件被历史数据凑齐, 产生本不该有的来向角。
         vector<SatelliteDataPhaseDiffA> tpA2;
         tpA2.reserve(dataB.size());
         for (unsigned int i = 0; i < dataB.size(); i++)
@@ -1068,7 +984,6 @@ void SpoofingDoa::getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     vector<vector<SatelliteDataPhaseDiffA>> resultDataA;
     int cutNum = (int)m_cutSequence.size();
-    // 入口不变量: index = (j+1)*m_OneCut_Frams - 1 必须在行数之内
     if (m_OneCut_Frams <= 0 || cutNum <= 0 ||
         (int)dataA.size() < cutNum * m_OneCut_Frams)
     {
@@ -1089,20 +1004,11 @@ void SpoofingDoa::getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 }
 
 void SpoofingDoa::setR(void){
-    // 全向天线: 所有频点使用同一阵列半径 m_omni_R
     for (auto it = m_F.begin(); it != m_F.end(); ++it){
         m_R[it->first] = m_omni_R;
     }
 }
 
-/**
- * @brief 设置某系统频点的欺骗检测阈值
- * @param sys         卫星系统编码
- * @param type        频点编码
- * @param threshold   卫星数阈值(-1 不修改)
- * @param phsThreshold 相位差阈值(度, <=0 不修改)
- * @note sys==-1 && type==-1 时初始化全部频点
- */
 void SpoofingDoa::setThresholdDetectionDoa(int sys, int type, int threshold, double phsThreshold)
 {
     PublicSpace::Log("Sys=%i,Type=%i,coutThreshold=%i,phsThreshold=%.1f\n", sys, type, threshold, phsThreshold);
@@ -1129,13 +1035,6 @@ void SpoofingDoa::resetCyclicDetection(void)
     m_Baselines.clear();
 }
 
-/**
- * @brief 配置循环切刀运行方式
- * @param cyclic      是否启用循环切刀检测
- * @param oneCutFrams 每个切刀帧数(>0 生效)
- * @param smooth      是否多帧平滑
- * @param omniR       全向天线阵列半径(米, >0 时重建理论模板)
- */
 void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR)
 {
     m_Cyclic_Detection_Flag = cyclic ? 1 : 0;
@@ -1195,9 +1094,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             if (cutAlarms.find(kv.first) == cutAlarms.end())
             {
                 kv.second = 0;
-                // 已确认跟踪的频点保留其跨周期基线(不因本刀未报警而清空)，仅未跟踪的
-                // 频点清空基线。否则只在部分刀报警的频点会反复清空基线、永远凑不齐 6 条
-                // 测向基线，导致报警频点/卫星数偏少。
                 if (m_Tracking.find(kv.first) == m_Tracking.end())
                 {
                     m_Baselines.erase(kv.first);
@@ -1219,9 +1115,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             }
         }
 
-        // 卫星级过滤：只保留"本时刻给出报警的频点"中"被本时刻相位差聚类判为欺骗"的
-        // 卫星。真星(未参与报警的卫星)的相位差、以及该频点未给出报警的时刻的相位差，
-        // 一律不进入跨周期基线、也不参与测向。
         vector<SatelliteDataPhaseDiffA> filtered;
         for (auto &sat : dataA[j])
         {
@@ -1240,8 +1133,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             continue;
         }
 
-        // 把本时刻的相位差并入跨周期基线(只覆盖本刀位)。基线因此只由"给出报警的时刻"
-        // 的相位差构成；跨轮次累积后仍可凑齐 6 条测向基线，无需借助未报警的相位差。
         {
             vector<vector<SatelliteDataPhaseDiffA>> oneCut(cutNum);
             oneCut[j] = filtered;
@@ -1253,8 +1144,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             accumulateBaselines(cutDataB);
         }
 
-        // 本时刻给出报警的频点：立即测向，生成"报警时刻"记录。
-        // 输出单位是"时刻是否给出报警"，不按整轮罗列已跟踪频点。
         for (auto &kv : cutAlarms)
         {
             int typeInt = kv.first;
@@ -1340,9 +1229,6 @@ void SpoofingDoa::accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB>
         int typeInt = TypeInt(b.i_Sys, b.i_Type);
         int prn = b.i_Prn;
 
-        // 二次保护：只累积已跟踪频点且属于 cluster 的卫星，与 Python baselines
-        // 只累积 cluster_sats 的语义一致。避免 Prn=39/33 等卫星通过 m_Baselines
-        // 凑齐 6 条测向刀位后被送入测向，拉偏来向角。
         auto itt = m_Tracking.find(typeInt);
         if (itt == m_Tracking.end()) continue;
         if (itt->second.cluster_sats.find(prn) == itt->second.cluster_sats.end()) continue;
@@ -1515,19 +1401,9 @@ void SpoofingDoa::setDetectionRecordNum(int num)
     }
 }
 
-/**
- * @brief 从单帧 GNSS 双通道数据提取逐星相位差
- * @param data  单帧 GNSS 数据(Port1/Port2 两通道)
- * @param dataA 输出: 各卫星的相位差、信噪比(按 PRN/系统/频点对齐)
- * @note 取两通道同名卫星的载波相位差(取小数部分, 归一化到 [0,1) 周)
- */
 void SpoofingDoa::getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA, bool snrFilter)
 {
     dataA.clear();
-    // 条数来自调用方结构体(i_PortOneNum/i_PortTwoNum), 必须夹进数组实际长度
-    // [0, GN902_MAX_PORT_SAT]: 下面的循环直接以它为 data.i_PortOne[]/i_PortTwo[]
-    // 的下标上界, 条数为负或超过数组长度时(调用方填错、或头文件与库版本不一致)
-    // 就会越界读整个 GNSSData, Linux 上直接段错误。
     int size1 = data.i_PortOneNum;
     int size2 = data.i_PortTwoNum;
     if (size1 < 0 || size1 > GN902_MAX_PORT_SAT)
@@ -1645,9 +1521,6 @@ void SpoofingDoa::getSatelliteDataPhaseDiffB(
 
     int size = (int)dataA.size();
 
-    // ★★★ 关键修复 ★★★
-    // SatelliteDataPhaseDiffB 内 i_Snr1/i_Snr2/i_phase_diff 长度均为 100，
-    // 后面用下标 i（切刀序号）写入，必须保证 i < 100。超长则截断并告警。
     const int MAX_CUT = 100;
     if (size > MAX_CUT)
     {
@@ -1758,10 +1631,6 @@ void SpoofingDoa::clearSatelliteDataPhaseDiffB(SatelliteDataPhaseDiffB &dataB)
     }
 }
 
-/**
- * @brief 从校正刀数据计算并设置通道校正偏移
- * @param dataA 各切刀相位差数据(取其中校正刀 {i,i} 计算偏移)
- */
 void SpoofingDoa::setCorrectionData(const vector<vector<SatelliteDataPhaseDiffA>> dataA)
 {
     if (dataA.size() != m_cutSequence.size())
@@ -1946,11 +1815,6 @@ void SpoofingDoa::calCorrecteData(SatelliteDataPhaseDiffA &dataA)
     }
 }
 
-/**
- * @brief 相关干涉仪测向调度: 组测向输入信息 → 逐星测向
- * @param dataB 各星相位差数据
- * @note 全向天线: 直接组 6 条基线信息, 再统一调用 calAngle 逐星测向
- */
 void SpoofingDoa::getResultInterferDoa(vector<SatelliteDataPhaseDiffB> dataB)
 {
     string nowT = getNowTime();
@@ -1962,10 +1826,6 @@ void SpoofingDoa::getResultInterferDoa(vector<SatelliteDataPhaseDiffB> dataB)
     calAngle(inferInfoData);
 }
 
-/**
- * @brief 建立相关干涉仪理论相位差模板
- * @note 对每个频点调用 calPhaseTheory 生成 [360角度][阵元] 理论模板
- */
 void SpoofingDoa::initTheory(void){
     int typeInt = 0;
     double f = 0;
@@ -2104,15 +1964,6 @@ double SpoofingDoa::circularSpan180Deg(const std::vector<double> &degs)
     return 180.0 - maxGap;
 }
 
-/**
- * @brief 欺骗检测核心: 判断某频点内卫星相位差是否聚成一簇(欺骗特征)
- * @param typeInt            频点编码(sys*100+type)
- * @param dataA              该频点各卫星相位差
- * @param alarmSatelliteData 输出: 被判为欺骗的卫星
- * @param alarm              输出: 1=报警(欺骗), 0=正常
- * @note 算法: 筛出高信噪比卫星 → 相位差归一化到 180° → 找最大聚集窗口 →
- *       聚集数超过阈值(m_Detection_Threshold)则报警
- */
 void SpoofingDoa::calAlarmByPhaseDiff(int typeInt, const std::vector<SatelliteDataPhaseDiffA> &dataA, std::vector<SatelliteDataPhaseDiffA> &alarmSatelliteData, int &alarm)
 {
     alarmSatelliteData.clear();
@@ -2195,9 +2046,6 @@ void SpoofingDoa::LogSpoofingResult(const SpoofingResult result)
         PublicSpace::Log("{\n");
         for (int j = 0; j < result.i_SatelliteAngle[i].i_Count; j++)
         {
-            // AlarmData::i_Angle 是 int(度), 不能用 %.1f: 变参下 int 走整数寄存器,
-            // %.1f 会取走下一个 SSE 寄存器(即 i_Quality), 于是 Angle 列打印出质量分、
-            // Quality 列打印出未赋值的残留值。这里改为 %d。
             PublicSpace::Log("Prn=%d,Snr=%.1f,Angle=%d,Quality=%.2f;\n",
                              result.i_SatelliteAngle[i].i_AlarmData[j].i_Prn, result.i_SatelliteAngle[i].i_AlarmData[j].i_Snr, result.i_SatelliteAngle[i].i_AlarmData[j].i_Angle, result.i_SatelliteAngle[i].i_AlarmData[j].i_Quality);
         }
@@ -2210,7 +2058,6 @@ void SpoofingDoa::LogGNSSData(const GNSSData data, int n)
     SatelliteData tp;
     if (0 != m_Save_Original_Flg)
     {
-        // 同 getSatelliteDataPhaseDiffA: 打印循环同样要夹到数组长度, 否则脏条数越界读
         int size1 = data.i_PortOneNum;
         int size2 = data.i_PortTwoNum;
         if (size1 < 0 || size1 > GN902_MAX_PORT_SAT)
@@ -2327,14 +2174,239 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<
 // =============================================================================
 
 // =============================================================================
-// 每个 GN902 实例的内部状态(引擎 + 整轮帧缓冲)。
-//   eng      : SpoofingDoa 引擎。构造时即 Init()，并按 Python 流程阈值
-//              初始化各频点)。引擎内部持跨轮(跨周期)状态 m_ConsecutiveAlarm /
-//              m_Tracking / m_Baselines，在本类多轮调用间持续累积。
-//   buf/cutIndex : 当前轮逐帧送来的 GNSSData 与对应切刀序号(0=校正, 1..6=六测向刀)。
-//   curCut   : 当前帧所在切刀序号，用于检测轮边界(校正刀 {1,1} 再次出现即新轮开始)。
-//   calFrames : 已储存的校正刀({1,1})数据，每轮出现校正刀则整体刷新。
-//   result   : 最近一轮喂入引擎后取出的测向结果(供 GetResult 返回)。
+// ★ GN902 独立日志 & 配置文件(.txt) ★
+//   - 与 PublicSpace::Log 完全分离，使用独立的文件句柄与独立命名；
+//   - 由外部 .txt 配置文件控制开关；未读到配置文件则默认不打印；
+//   - 日志文件路径由配置文件 log_path 指定，可自定义命名；
+//   - ★ 新增 ★ cutCountThreshold：连续报警确认刀数(对应引擎 m_Detection_Recodds_Num)，
+//     也由同一 txt 配置文件 cut_count_threshold 键传入。
+//
+// 配置文件按以下顺序查找(第一个可读文件生效)：
+//     1) 环境变量 GN902_CONFIG 指定的路径
+//     2) ./gn902_config.txt
+//     3) ./config/gn902_config.txt
+//     4) ../config/gn902_config.txt
+//
+// 配置文件内容(以 '#' 或 ';' 作为注释起始)：
+//     # 是否启用独立日志，1=开启，0=关闭(默认关闭)
+//     log_enable=1
+//     # 独立日志文件路径(相对/绝对路径, 需带文件名)
+//     log_path=./logs/gn902_doa.log
+//     # ★ 连续报警确认刀数(1..10)，不写或写 -1 时使用引擎默认值(2)
+//     cut_count_threshold=2
+// =============================================================================
+namespace {
+
+struct GN902RuntimeConfig
+{
+    bool        logEnable;          // 独立日志开关 (默认 false)
+    std::string logPath;            // 独立日志文件路径(含文件名)
+    std::string cfgPath;            // 实际加载到的配置文件路径 (""=未找到)
+    int         cutCountThreshold;  // ★ 连续报警确认刀数(1..10); -1=不修改引擎默认值
+
+    GN902RuntimeConfig()
+        : logEnable(false),
+          logPath("./gn902_debug.log"),
+          cfgPath(""),
+          cutCountThreshold(-1) {}
+};
+
+GN902RuntimeConfig g_gn902Cfg;
+bool              g_gn902CfgLoaded = false;
+FILE             *g_gn902LogFp     = 0;
+std::mutex        g_gn902LogMutex;
+
+// 去除首尾空白
+std::string gn902Trim(const std::string &s)
+{
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// 转小写
+std::string gn902Lower(std::string s)
+{
+    for (size_t i = 0; i < s.size(); ++i)
+    {
+        s[i] = (char)std::tolower((unsigned char)s[i]);
+    }
+    return s;
+}
+
+// 解析一个 .txt 配置文件, 成功打开并读取返回 true (即使文件为空也算成功)
+bool gn902ParseConfigFile(const std::string &path, GN902RuntimeConfig &cfg)
+{
+    try
+    {
+        std::ifstream fin(path.c_str());
+        if (!fin.is_open())
+        {
+            return false;
+        }
+
+        std::string line;
+        while (std::getline(fin, line))
+        {
+            // 去注释('#',';')
+            size_t cut = line.find_first_of("#;");
+            if (cut != std::string::npos)
+            {
+                line = line.substr(0, cut);
+            }
+            line = gn902Trim(line);
+            if (line.empty())
+            {
+                continue;
+            }
+
+            size_t eq = line.find('=');
+            if (eq == std::string::npos)
+            {
+                continue;
+            }
+
+            std::string key = gn902Lower(gn902Trim(line.substr(0, eq)));
+            std::string val = gn902Trim(line.substr(eq + 1));
+
+            if (key == "log_enable" || key == "log_enabled" || key == "log")
+            {
+                std::string lv = gn902Lower(val);
+                cfg.logEnable = !(lv == "0" || lv == "false" ||
+                                  lv == "no"  || lv == "off" || lv.empty());
+            }
+            else if (key == "log_path" || key == "log_file" || key == "logpath")
+            {
+                if (!val.empty())
+                {
+                    cfg.logPath = val;
+                }
+            }
+            // ★ 新增: 连续报警确认刀数(1..10)。不在此范围则忽略, 保持引擎默认值。
+            else if (key == "cut_count_threshold" ||
+                     key == "cutcountthreshold"   ||
+                     key == "cut_count"           ||
+                     key == "cutcount")
+            {
+                try
+                {
+                    int v = std::stoi(val);
+                    if (v >= 1 && v <= 10)
+                    {
+                        cfg.cutCountThreshold = v;
+                    }
+                    else
+                    {
+                        std::cerr << "[GN902] cut_count_threshold 超出范围(1..10), 忽略: "
+                                  << v << std::endl;
+                    }
+                }
+                catch (const std::exception &)
+                {
+                    std::cerr << "[GN902] cut_count_threshold 解析失败, 忽略: "
+                              << val << std::endl;
+                }
+            }
+        }
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "[GN902] 解析配置文件异常: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// 懒加载配置文件，只执行一次
+void gn902LoadConfig()
+{
+    if (g_gn902CfgLoaded)
+    {
+        return;
+    }
+    g_gn902CfgLoaded = true;
+
+    // 默认值: 不打印独立日志, 不覆盖引擎默认 cutCountThreshold
+    g_gn902Cfg.logEnable = false;
+    g_gn902Cfg.logPath   = "./gn902_debug.log";
+    g_gn902Cfg.cfgPath   = "";
+    g_gn902Cfg.cutCountThreshold = -1;
+
+    // 1) 环境变量优先
+    const char *envCfg = std::getenv("GN902_CONFIG");
+    if (envCfg != 0 && *envCfg != '\0')
+    {
+        if (gn902ParseConfigFile(envCfg, g_gn902Cfg))
+        {
+            g_gn902Cfg.cfgPath = envCfg;
+            return;
+        }
+    }
+
+    // 2) 依次尝试常见路径(全部使用 .txt)
+    const char *candidates[] = {
+        "./gn902_config.txt",
+        "./config/gn902_config.txt",
+        "../config/gn902_config.txt"
+    };
+    const size_t nCand = sizeof(candidates) / sizeof(candidates[0]);
+    for (size_t i = 0; i < nCand; ++i)
+    {
+        if (gn902ParseConfigFile(candidates[i], g_gn902Cfg))
+        {
+            g_gn902Cfg.cfgPath = candidates[i];
+            return;
+        }
+    }
+    // 一个都没读到: 保持默认(不打印), cfgPath 保持空
+}
+
+// 独立命名日志：与 PublicSpace::Log 完全分离
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 1, 2)))
+#endif
+void GN902Log(const char *fmt, ...)
+{
+    if (!g_gn902Cfg.logEnable)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lk(g_gn902LogMutex);
+
+    if (g_gn902LogFp == 0)
+    {
+        g_gn902LogFp = fopen(g_gn902Cfg.logPath.c_str(), "a");
+        if (g_gn902LogFp == 0)
+        {
+            std::cerr << "[GN902] 无法打开独立日志文件: "
+                      << g_gn902Cfg.logPath << std::endl;
+            return;
+        }
+    }
+
+    // 时间戳
+    std::time_t t = std::time(0);
+    std::tm    *lt = std::localtime(&t);
+    char ts[32] = {0};
+    if (lt != 0)
+    {
+        std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", lt);
+    }
+    fprintf(g_gn902LogFp, "[%s] ", ts);
+
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_gn902LogFp, fmt, ap);
+    va_end(ap);
+
+    fflush(g_gn902LogFp);
+}
+
+} // namespace
+
+// =============================================================================
+// GN902State 结构定义
 // =============================================================================
 namespace {
 struct GN902State
@@ -2384,7 +2456,7 @@ std::map<const GN902 *, GN902State *> g_gn902State;
 // GN902 实例容器(声明于 interface.h)，供 Create_GN902/Release_GN902 等 C 接口使用
 std::vector<GN902 *> GN902Container;
 
-// 天线对 -> 切刀序号：校正刀 {1,1} -> 0；六测向刀 {1,2}..{1,7} -> 1..6。
+// 天线对 -> 切刀序号：校正刀 {7,7} -> 0；六测向刀 {1,2}..{1,7} -> 1..6。
 // 参考天线(通道1)固定为天线1，通道2在天线 1..7 间循环切换。
 static int mapPairToCutIndex(int cutIdx_1, int cutIdx_2)
 {
@@ -2438,12 +2510,51 @@ GN902::GN902(){
     {
         // GN902 运行参数：循环切刀检测开、全向半径 0.1865m(重建理论模板)。
         st->eng->configCyclicRuntime(true, 0, false, 0.1865);
-        // 切刀顺序 = {1,1},{1,2},{1,3},{1,4},{1,5},{1,6},{1,7}
+        // 切刀顺序 = {7,7},{1,2},{1,3},{1,4},{1,5},{1,6},{1,7}
         // (7 组天线对 = 校正刀 + 六刀测向，对齐 Python code 0/9/57/17/25/33/1)
-        const int cutSeq[14] = {1, 1, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7};
+        const int cutSeq[14] = {7, 7, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7};
         st->eng->setCutSquence(14, cutSeq);
     }
     g_gn902State[this] = st;
+
+    // ★ 加载独立日志配置(懒加载, 只执行一次)
+    gn902LoadConfig();
+
+    // ★ 应用 txt 配置中的 cutCountThreshold(连续报警确认刀数) ★
+    //   - 未配置或配置无效 (-1) 时, 引擎保持自身默认值(m_Detection_Recodds_Num=2);
+    //   - 配置 1..10 时, 通过 setDetectionRecordNum 覆盖引擎默认值。
+    if (st->eng != 0 && g_gn902Cfg.cutCountThreshold > 0)
+    {
+        st->eng->setDetectionRecordNum(g_gn902Cfg.cutCountThreshold);
+    }
+
+    if (g_gn902Cfg.cfgPath.empty())
+    {
+        std::cout << "[GN902] 未找到配置文件(.txt), 独立日志默认关闭" << std::endl;
+    }
+    else
+    {
+        std::cout << "[GN902] 已加载配置: " << g_gn902Cfg.cfgPath
+                  << " | 独立日志=" << (g_gn902Cfg.logEnable ? "开启" : "关闭")
+                  << " | 路径=" << g_gn902Cfg.logPath
+                  << " | cutCountThreshold=";
+        if (g_gn902Cfg.cutCountThreshold > 0)
+        {
+            std::cout << g_gn902Cfg.cutCountThreshold;
+        }
+        else
+        {
+            std::cout << "(引擎默认)";
+        }
+        std::cout << std::endl;
+    }
+
+    // ★ 首次写入独立日志(若开启)，标记实例创建
+    GN902Log("=== GN902 实例创建: cfg=%s logEnable=%d logPath=%s cutCountThreshold=%d ===\n",
+             g_gn902Cfg.cfgPath.empty() ? "(未找到)" : g_gn902Cfg.cfgPath.c_str(),
+             (int)g_gn902Cfg.logEnable,
+             g_gn902Cfg.logPath.c_str(),
+             g_gn902Cfg.cutCountThreshold);
 }
 
 GN902::~GN902(){
@@ -2459,10 +2570,9 @@ GN902::~GN902(){
 // 设置阈值检测参数
 // @param phsDiffThreshold 位相差阈值
 // @param satelliteCountThreshold 卫星数阈值
-// @param cutCountThreshold 通道2对应天线阈值(连续确认刀数)
 // @param sysEnum 系统类型
 // @param typeEnum 类型
-void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, double cutCountThreshold, int sysEnum, int typeEnum){
+void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, int sysEnum, int typeEnum){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
     if (it == g_gn902State.end() || it->second->eng == 0)
     {
@@ -2471,11 +2581,12 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     SpoofingDoa *eng = it->second->eng;
     // 参数顺序: (系统sysEnum, 频点typeEnum, 卫星数阈值satelliteCountThreshold, 相位差阈值phsDiffThreshold)
     eng->setThresholdDetectionDoa(sysEnum, typeEnum, (int)satelliteCountThreshold, phsDiffThreshold);
-    // cutCountThreshold = 连续确认刀数 p(对应 ALARM_CONSECUTIVE_P)，>0 时生效
-    if (cutCountThreshold > 0)
-    {
-        eng->setDetectionRecordNum((int)cutCountThreshold);
-    }
+
+    // 注意: 连续报警确认刀数 cutCountThreshold 不再由本接口传入。
+    //       它统一由 GN902 实例构造时从 txt 配置文件(键: cut_count_threshold)读取,
+    //       在 GN902::GN902() 中通过 setDetectionRecordNum() 应用(见本文件上方)。
+    GN902Log("SetThresholdDetection: sys=%d type=%d phsDiff=%.3f satCount=%.3f ",
+             sysEnum, typeEnum, phsDiffThreshold, satelliteCountThreshold);
     return;
 }
 
@@ -2501,14 +2612,14 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2){
         collectFixedPairPhaseDiff(st, data, cutIdx_1, cutIdx_2);
         return;
     }
-    // 天线对 -> 切刀序号(0=校正{1,1}, 1..6=测向{1,2}..{1,7})；非标准对忽略该帧
+    // 天线对 -> 切刀序号(0=校正{7,7}, 1..6=测向{1,2}..{1,7})；非标准对忽略该帧
     int cut = mapPairToCutIndex(cutIdx_1, cutIdx_2);
     if (cut < 0)
     {
         return;
     }
 
-    // 轮边界检测：校正刀(天线对{1,1})再次出现且上一帧非校正刀时，
+    // 轮边界检测：校正刀(天线对{7,7})再次出现且上一帧非校正刀时，
     // 说明上一轮(校正刀 + 六测向刀)已完整结束 -> 处理上一轮并开始新轮。
     if (cut == 0 && st->curCut != 0 && !st->buf.empty())
     {
@@ -2520,11 +2631,14 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2){
     st->curCut = cut;
     st->buf.push_back(*data);
     st->cutIndex.push_back(cut);
+
+    // ★ 独立日志记录一帧到达
+    GN902Log("SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d\n",
+             cutIdx_1, cutIdx_2, cut, data->i_PortOneNum, data->i_PortTwoNum);
     return;
 }
 
 // 获取结果
-// @param result 结果结构体
 void GN902::GetResult(SpoofingResult& result){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
     if (it == g_gn902State.end())
@@ -2550,7 +2664,6 @@ void GN902::GetAlarmMoments(std::vector<AlarmMoment>& out){
 }
 
 // 检测
-// 整轮组批并喂入引擎，完成循环切刀欺骗检测与跟踪(跨轮状态在引擎内连续累积)。
 void GN902::Detect(){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
     if (it == g_gn902State.end() || it->second->eng == 0)
@@ -2616,10 +2729,8 @@ void GN902::Detect(){
         }
     }
 
-    // ★★★ 关键修复 ★★★
     // batch 大小 = 7*C，会被引擎内部的 SatelliteDataPhaseDiffB 逐帧写入
     // 长度 100 的栈数组(见 getSatelliteDataPhaseDiffB)。必须保证 7*C <= 100。
-    // 超出时只保留每刀末尾的 MAX_C 帧(最稳定尾段)。
     const int MAX_C = 14;  // 7*14 = 98 <= 100
     if (detUniform && C > MAX_C)
     {
@@ -2680,12 +2791,15 @@ void GN902::Detect(){
         }
     }
 
+    // ★ 独立日志记录本轮组批信息
+    GN902Log("Detect: batchSize=%d uniform=%d oneCutFrams=%d smooth=%d cutComplete=%d\n",
+             (int)batch.size(), (int)uniform, oneCutFrams, (int)smooth, (int)cutComplete);
+
     st->eng->configCyclicRuntime(true, oneCutFrams, smooth, 0.0);
     st->eng->setGNSSData(batch.data(), (int)batch.size());
     return;
 }
 // 测向
-// 从引擎取出本轮测向结果，存入内部 result 供 GetResult 返回。
 void GN902::Doa(){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
     if (it == g_gn902State.end() || it->second->eng == 0)
@@ -2695,5 +2809,17 @@ void GN902::Doa(){
     GN902State *st = it->second;
     st->clearResult();
     st->eng->getAngleSpoofingDoa(st->result);
+
+    // ★ 独立日志记录本轮测向结果
+    GN902Log("Doa: 报警频点数=%d\n", st->result.i_Count);
+    for (int i = 0; i < st->result.i_Count; ++i)
+    {
+        GN902Log("  Sys=%d Type=%d Count=%d Angle=%.2f Alarm=%d\n",
+                 st->result.i_SatelliteAngle[i].i_Sys,
+                 st->result.i_SatelliteAngle[i].i_Type,
+                 st->result.i_SatelliteAngle[i].i_Count,
+                 st->result.i_SatelliteAngle[i].i_Angle,
+                 st->result.i_SatelliteAngle[i].i_Alarm);
+    }
     return;
 }

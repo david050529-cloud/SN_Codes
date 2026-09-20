@@ -7,9 +7,9 @@
 
 // #define DOA_DEBUG
 #ifdef _WIN32
- char Version[] = "V1.6.9.1";
+ char Version[] = "V1.0.1";
 #else
- char Version[] = "V1.6.9.1";
+ char Version[] = "V1.0.1";
 #endif
 
 using namespace std;
@@ -58,9 +58,8 @@ int Create_GN902(int & id){
 
 // 设置阈值
 int SetThresholdDetection_GN902(int id,
-                                double phsDiffThreshold,
                                 double satelliteCountThreshold,
-                                double cutCountThreshold,
+                                double phsDiffThreshold,
                                 int sysEnum,
                                 int typeEnum){
     if(id < 0 || id >= (int)GN902Container.size() || !GN902Container[id]){
@@ -68,7 +67,7 @@ int SetThresholdDetection_GN902(int id,
     }
     GN902* p = GN902Container[id];
     p->SetThresholdDetection(phsDiffThreshold, satelliteCountThreshold,
-                             cutCountThreshold, sysEnum, typeEnum);
+                             sysEnum, typeEnum);
     return 0;
 }
 

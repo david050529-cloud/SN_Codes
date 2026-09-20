@@ -51,6 +51,9 @@ int main()
 //   "port1File"       : 端口1 dat 文件（可选，优先于 datDir）
 //   "debugFile"       : 切刀时刻表 debug 文件（含 OpenAntenna code 标记）
 //   "logFile"         : 结果日志输出路径（默认 ./gn902_result.log）
+//   "getResultFile"   : ★ 新增 ★ GetResult_GN902 返回结果专用保存路径
+//                       （默认 ./gn902_getresult.txt）。该文件只存放
+//                       GetResult_GN902 的返回值快照，与 logFile 完全分离。
 //   "switchSeconds"   : 每刀保留末尾稳定秒数（默认 1，与 Python 流程对齐）
 //   可选阈值覆盖（不设则用引擎默认，与 Python 硬编码阈值一致）:
 //   "phsDiffThreshold" / "satelliteCountThreshold" / "cutCountThreshold" /
@@ -77,6 +80,87 @@ static void gn902LogLine(FILE *logFp, const char *fmt, ...)
 		va_end(args);
 		fflush(logFp);
 	}
+}
+
+// =============================================================================
+// ★ 新增: GetResult_GN902 返回值专用保存
+// -----------------------------------------------------------------------------
+// 每次调用 GetResult_GN902 成功后, 把返回的 SpoofingResult 独立写入专用文件,
+// 与主结果日志(gn902_result.log)完全分离, 便于单独分析/比对。
+// 文件内容采用逐字段可读格式, 一行一条, 方便 diff / 后续脚本处理。
+// =============================================================================
+
+// 在专用文件中写一行(带时间戳前缀)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 2, 3)))
+#endif
+static void gn902GetResultLine(FILE *fp, const char *fmt, ...)
+{
+	if (fp == 0) return;
+
+	// 时间戳
+	std::time_t t = std::time(0);
+	std::tm *lt = std::localtime(&t);
+	char ts[32] = {0};
+	if (lt != 0)
+	{
+		std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", lt);
+	}
+	fprintf(fp, "[%s] ", ts);
+
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(fp, fmt, args);
+	va_end(args);
+	fflush(fp);
+}
+
+// 把 SpoofingResult 单独保存到专用文件。
+// @param fp       专用文件句柄(由 main902 打开, 追加模式)
+// @param result   库写入的结果结构体
+// @param roundIdx 轮序号(从 1 开始, 每完成一轮 +1)
+// @param roundSec 本轮最后一刀时刻(GPS 秒, 0=未知)
+static void gn902SaveSpoofingResult(FILE *fp, const SpoofingResult &result,
+                                    int roundIdx, double roundSec)
+{
+	if (fp == 0)
+	{
+		return;
+	}
+
+	gn902GetResultLine(fp,
+		"==== Round=%d  RoundSec=%.1f  AlarmFreqCount=%d ====\n",
+		roundIdx, roundSec, result.i_Count);
+
+	// 越界夹紧: 库最多写 24 个频点 / 每频点最多 32 颗卫星
+	int freqNum = result.i_Count;
+	if (freqNum > 24) freqNum = 24;
+	if (freqNum < 0)  freqNum = 0;
+
+	for (int i = 0; i < freqNum; ++i)
+	{
+		const SatelliteAngle &sa = result.i_SatelliteAngle[i];
+		gn902GetResultLine(fp,
+			"  Freq[%d]: Sys=%s(%d) Type=%s(%d) Alarm=%d Angle=%.2f SatCount=%d\n",
+			i,
+			GetSysName(sa.i_Sys), sa.i_Sys,
+			GetTypeName(sa.i_Sys, sa.i_Type), sa.i_Type,
+			sa.i_Alarm, sa.i_Angle, sa.i_Count);
+
+		int satNum = sa.i_Count;
+		if (satNum > 32) satNum = 32;
+		if (satNum < 0)  satNum = 0;
+
+		for (int j = 0; j < satNum; ++j)
+		{
+			const AlarmData &ad = sa.i_AlarmData[j];
+			// AlarmData::i_Angle 是 int(度), 不能用 %f 打印
+			gn902GetResultLine(fp,
+				"    Sat[%d]: Prn=%d Snr=%.1f Angle=%d Quality=%.2f\n",
+				j, ad.i_Prn, ad.i_Snr, ad.i_Angle, ad.i_Quality);
+		}
+	}
+	gn902GetResultLine(fp, "----\n");
 }
 
 // 打印/记录一轮内的全部"报警时刻"结果。
@@ -220,7 +304,7 @@ int main902(json jsonData)
 	}
 
 	// ---- 1. 读取配置 ----
-	std::string datDir, port0File, port1File, debugFile, logFile;
+	std::string datDir, port0File, port1File, debugFile, logFile, getResultFile;
 	if (jsonData.count("datDir"))
 		datDir = jsonData["datDir"].get<std::string>();
 	if (jsonData.count("port0File"))
@@ -230,6 +314,11 @@ int main902(json jsonData)
 	if (jsonData.count("debugFile"))
 		debugFile = jsonData["debugFile"].get<std::string>();
 	logFile = jsonData.count("logFile") ? jsonData["logFile"].get<std::string>() : "./gn902_result.log";
+	// ★ 新增: GetResult_GN902 返回值专用保存文件路径(可选, 默认 ./gn902_getresult.txt)
+	getResultFile = jsonData.count("getResultFile")
+		? jsonData["getResultFile"].get<std::string>()
+		: std::string("./gn902_getresult.txt");
+
 	int switchSeconds = jsonData.count("switchSeconds") ? jsonData["switchSeconds"].get<int>() : 1;
 
 	// 固定基线采集模式(可选): 配置里提供 fixedPair=[通道1天线,通道2天线] 时，
@@ -276,6 +365,7 @@ int main902(json jsonData)
 	printf("  端口1 dat : %s\n", port1File.c_str());
 	printf("  debug     : %s\n", debugFile.c_str());
 	printf("  日志      : %s\n", logFile.c_str());
+	printf("  GetResult : %s\n", getResultFile.c_str());
 	printf("  模式      : %s\n", collectMode ? "固定基线采集(相位差)" : "循环切刀检测+测向");
 	if (collectMode)
 	{
@@ -285,6 +375,24 @@ int main902(json jsonData)
 
 	// ---- 2. 打开结果日志 ----
 	FILE *logFp = fopen(logFile.c_str(), "w");
+
+	// ★ 新增: 打开 GetResult_GN902 返回值专用保存文件(追加模式)
+	//    写前先写一段头部说明, 便于后续阅读。
+	FILE *getResultFp = fopen(getResultFile.c_str(), "w");
+	if (getResultFp != 0)
+	{
+		gn902GetResultLine(getResultFp,
+			"=== GN902 GetResult_GN902 结果快照 ===\n");
+		gn902GetResultLine(getResultFp,
+			"     port0=%s\n", port0File.c_str());
+		gn902GetResultLine(getResultFp,
+			"     port1=%s\n", port1File.c_str());
+		gn902GetResultLine(getResultFp,
+			"     debug=%s\n", debugFile.c_str());
+		gn902GetResultLine(getResultFp,
+			"     sizeof(SpoofingResult)=%d\n", (int)sizeof(SpoofingResult));
+		gn902GetResultLine(getResultFp, "==================================\n");
+	}
 
 	// ---- 3. 解析两端口 dat ----
 	std::map<double, std::vector<SatelliteData>> port0 = parseDatPort(port0File);
@@ -362,6 +470,8 @@ int main902(json jsonData)
 		gn902LogLine(logFp, "[GN902] Create_GN902 失败 ret=%d\n", ret);
 		if (logFp)
 			fclose(logFp);
+		if (getResultFp)
+			fclose(getResultFp);
 		return ret;
 	}
 
@@ -373,7 +483,8 @@ int main902(json jsonData)
 		double cutTh = jsonData.count("cutCountThreshold") ? jsonData["cutCountThreshold"].get<double>() : 0.0;
 		int sys = jsonData.count("sysEnum") ? jsonData["sysEnum"].get<int>() : -1;
 		int type = jsonData.count("typeEnum") ? jsonData["typeEnum"].get<int>() : -1;
-		ret = SetThresholdDetection_GN902(id, phsTh, satTh, cutTh, sys, type);
+		// ret = SetThresholdDetection_GN902(id, phsTh, satTh, cutTh, sys, type);
+		ret = SetThresholdDetection_GN902(id, satTh, phsTh, sys, type);
 		if (ret != 0)
 			gn902LogLine(logFp, "[GN902] SetThresholdDetection_GN902 失败 ret=%d\n", ret);
 	}
@@ -445,7 +556,10 @@ int main902(json jsonData)
 					}
 					else
 					{
-						gn902LogSpoofingResult(logFp, result, gn902LastCutSec(doneSec));
+						double roundSec = gn902LastCutSec(doneSec);
+						gn902LogSpoofingResult(logFp, result, roundSec);
+						// ★ 新增: 单独保存 GetResult_GN902 返回结果
+						gn902SaveSpoofingResult(getResultFp, result, roundIdx + 1, roundSec);
 						totalResultRound++;
 					}
 
@@ -474,7 +588,7 @@ int main902(json jsonData)
 		// 末尾轮：与 Python 一致，末尾不完整周期也逐刀处理。缺失的测向刀用空帧(无卫星)
 		// 补齐，使引擎仍按 7 刀(校正 + 六测向)组批；缺刀位的相位差由跨周期基线 m_Baselines
 		// 补缺，随后用一帧空校正触发上一轮检测+测向。
-		// 注意：仅当本周期已喂入至少一刀测向(doaMask!=0)时才flush，避免“最后恰为一校正刀”
+		// 注意：仅当本周期已喂入至少一刀测向(doaMask!=0)时才flush，避免"最后恰为一校正刀"
 		// 时凭空多出一轮空结果。
 		if (doaMask != 0)
 		{
@@ -504,7 +618,10 @@ int main902(json jsonData)
 			}
 			else
 			{
-				gn902LogSpoofingResult(logFp, result, gn902LastCutSec(doneSec));
+				double roundSec = gn902LastCutSec(doneSec);
+				gn902LogSpoofingResult(logFp, result, roundSec);
+				// ★ 新增: 单独保存 GetResult_GN902 返回结果(末尾轮)
+				gn902SaveSpoofingResult(getResultFp, result, roundIdx + 1, roundSec);
 				totalResultRound++;
 			}
 
@@ -522,10 +639,22 @@ int main902(json jsonData)
 		gn902LogLine(logFp, "GN902 检测完成: 处理 %d 个完整测向轮, 共 %d 个报警时刻记录\n", roundIdx, totalAlarmCount);
 		gn902LogLine(logFp, "GetResult_GN902 取结果成功 %d 次(每完成一轮一次)\n", totalResultRound);
 		gn902LogLine(logFp, "================================================================\n");
+
+		// ★ 新增: 在专用文件末尾也写一段汇总
+		if (getResultFp != 0)
+		{
+			gn902GetResultLine(getResultFp, "==================================\n");
+			gn902GetResultLine(getResultFp,
+				"总计: 处理 %d 轮, GetResult_GN902 成功取回结果 %d 次\n",
+				roundIdx, totalResultRound);
+			gn902GetResultLine(getResultFp, "==================================\n");
+		}
 	}
 
 	Release_GN902(id);
 	if (logFp)
 		fclose(logFp);
+	if (getResultFp)
+		fclose(getResultFp);
 	return 0;
 }

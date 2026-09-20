@@ -18,9 +18,8 @@ GN902_EXTERN_C int Create_GN902(int &id);
 
 GN902_EXTERN_C int SetThresholdDetection_GN902(
     int id,
-    double phsDiffThreshold,
     double satelliteCountThreshold,
-    double cutCountThreshold,
+    double phsDiffThreshold,
     int sysEnum,
     int typeEnum);
 
@@ -38,5 +37,8 @@ GN902_EXTERN_C int GetResult_GN902(int id, SpoofingResult& result);
 GN902_EXTERN_C unsigned int GetAbiSignature_GN902();
 
 GN902_EXTERN_C int Release_GN902(int id);
+
+// 连续切刀计数阈值: >0 时生效, 对应连续报警确认次数
+GN902_EXTERN_C int SetCutnumThreshold_GN902(int id, int thresholdCount);
 
 #endif
