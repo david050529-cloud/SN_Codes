@@ -24,7 +24,11 @@ GN902_EXTERN_C int SetThresholdDetection_GN902(
     int typeEnum);
 
 // 一秒传入一次数据；cutIdx_1 通道1天线，cutIdx_2 通道2天线
-// 天线对 {8,9} 或 {9,8} 为固定基线采集模式（仅采集相位差，不测向）
+//   - 校正刀: (7,7)  同一根天线接两个端口，测通道固有相差；每轮必须传一次
+//   - 六测向刀: (1,2)..(1,7)  参考天线(通道1)固定为天线 1，通道2 依次切到 2..7
+//   - 天线对 {8,9} 或 {9,8} 为固定基线采集模式（仅采集相位差，不测向）
+// 注意: 校正刀若不按 (7,7) 传入，该帧会被整帧丢弃，轮边界不触发，
+//       Detect/Doa 一次都不执行（表现为完全无结果）。
 GN902_EXTERN_C int SetData_GN902(int id, const GNSSData* data,
                                  int cutIdx_1, int cutIdx_2);
 

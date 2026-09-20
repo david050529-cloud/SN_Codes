@@ -7,8 +7,22 @@
 #
 # log_path   : 独立日志文件路径(相对/绝对皆可, 需带文件名)
 #              可自定义命名，与 PublicSpace::Log 输出的 .log 文件互不影响。
+#
+# save_data_enable : 是否保存上位机经 SetData_GN902 传入算法的原始数据
+#                    1 / true / yes / on  -> 开启
+#                    0 / false / no / off -> 关闭(默认)
+#                    逐帧记录天线对/切刀序号/双端口卫星数/逐星字段，
+#                    被引擎忽略的非标准天线对帧也会记录，用于排查喂数问题。
+#
+# save_data_path   : 原始输入数据文件路径(相对/绝对皆可, 需带文件名)
 # =============================================================
 
 log_enable=1
 log_path=./gn902_doa.txt
-cut_count_threshold=2
+
+save_data_enable=0
+save_data_path=./gn902_input.log
+
+# 注意: 连续切刀数(连续报警确认次数)已改为通过接口 SetCutnumThreshold_GN902 传入，
+#       本配置文件的 cut_count_threshold 键不再生效(已忽略)。
+# cut_count_threshold=2

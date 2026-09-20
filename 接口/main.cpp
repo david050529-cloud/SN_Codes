@@ -551,7 +551,7 @@ int main902(json jsonData)
 				memset(cutSec, 0, sizeof(cutSec));
 				memset(cutCode, 0, sizeof(cutCode));
 
-				SetData_GN902(id, &frame, 1, 1);
+				SetData_GN902(id, &frame, 7, 7); // 校正刀: 天线对(7,7)
 				if (inRound && (doaMask & 0xFC) == 0xFC)
 				{
 					// 上一轮已组批检测+测向完成, 通过对外 C 接口取频点级结果。
@@ -615,7 +615,7 @@ int main902(json jsonData)
 			}
 			GNSSData dummyCal;
 			memset(&dummyCal, 0, sizeof(dummyCal));
-			SetData_GN902(id, &dummyCal, 1, 1);
+			SetData_GN902(id, &dummyCal, 7, 7); // 末尾补一帧空校正刀(天线对 7,7)
 
 			// 末尾轮同样用对外接口取频点级结果
 			SpoofingResult result;

@@ -2192,6 +2192,10 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<
 //     log_enable=1
 //     # 独立日志文件路径(相对/绝对路径, 需带文件名)
 //     log_path=./logs/gn902_doa.log
+//     # 是否保存上位机传入算法的原始数据，1=开启，0=关闭(默认关闭)
+//     save_data_enable=1
+//     # 原始输入数据文件路径(相对/绝对路径, 需带文件名)
+//     save_data_path=./gn902_input.log
 // =============================================================================
 namespace {
 
@@ -2200,11 +2204,15 @@ struct GN902RuntimeConfig
     bool        logEnable;          // 独立日志开关 (默认 false)
     std::string logPath;            // 独立日志文件路径(含文件名)
     std::string cfgPath;            // 实际加载到的配置文件路径 (""=未找到)
+    bool        saveDataEnable;     // 原始输入数据保存开关 (默认 false)
+    std::string saveDataPath;       // 原始输入数据文件路径(含文件名)
 
     GN902RuntimeConfig()
         : logEnable(false),
           logPath("./gn902_debug.log"),
-          cfgPath("") {}
+          cfgPath(""),
+          saveDataEnable(false),
+          saveDataPath("./gn902_input.log") {}
 };
 
 GN902RuntimeConfig g_gn902Cfg;
@@ -2279,6 +2287,23 @@ bool gn902ParseConfigFile(const std::string &path, GN902RuntimeConfig &cfg)
                     cfg.logPath = val;
                 }
             }
+            // 是否保存上位机传入算法的原始数据
+            else if (key == "save_data_enable" || key == "save_data_enabled" ||
+                     key == "save_data"        || key == "savedata")
+            {
+                std::string sv = gn902Lower(val);
+                cfg.saveDataEnable = !(sv == "0" || sv == "false" ||
+                                       sv == "no"  || sv == "off" || sv.empty());
+            }
+            // 原始输入数据文件路径
+            else if (key == "save_data_path" || key == "save_data_file" ||
+                     key == "savedatapath")
+            {
+                if (!val.empty())
+                {
+                    cfg.saveDataPath = val;
+                }
+            }
         }
         return true;
     }
@@ -2298,10 +2323,12 @@ void gn902LoadConfig()
     }
     g_gn902CfgLoaded = true;
 
-    // 默认值: 不打印独立日志
+    // 默认值: 不打印独立日志, 不保存原始输入数据
     g_gn902Cfg.logEnable = false;
     g_gn902Cfg.logPath   = "./gn902_debug.log";
     g_gn902Cfg.cfgPath   = "";
+    g_gn902Cfg.saveDataEnable = false;
+    g_gn902Cfg.saveDataPath   = "./gn902_input.log";
 
     // 1) 环境变量优先
     const char *envCfg = std::getenv("GN902_CONFIG");
@@ -2388,8 +2415,10 @@ struct GN902State
     std::vector<GNSSData> calFrames; // 储存的校正刀数据
     SpoofingResult result;           // 最近一轮测向结果
     FILE *phaseDiffFp;               // 固定基线相位差采集日志(追加模式)
+    FILE *inputDataFp;               // 原始输入数据保存文件(追加模式, 0=未打开)
+    long long inputDataCount;        // 已保存的输入帧数
 
-    GN902State() : eng(0), curCut(-1), phaseDiffFp(0) { clearResult(); }
+    GN902State() : eng(0), curCut(-1), phaseDiffFp(0), inputDataFp(0), inputDataCount(0) { clearResult(); }
 
     ~GN902State()
     {
@@ -2402,6 +2431,11 @@ struct GN902State
         {
             fclose(phaseDiffFp);
             phaseDiffFp = 0;
+        }
+        if (inputDataFp)
+        {
+            fclose(inputDataFp);
+            inputDataFp = 0;
         }
     }
 
@@ -2427,14 +2461,23 @@ std::map<const GN902 *, GN902State *> g_gn902State;
 std::vector<GN902 *> GN902Container;
 
 // 天线对 -> 切刀序号：校正刀 {7,7} -> 0；六测向刀 {1,2}..{1,7} -> 1..6。
-// 参考天线(通道1)固定为天线1，通道2在天线 1..7 间循环切换。
+//   校正刀: 同一根天线(7)接两个端口, 测的是通道固有相差, 与测向刀的天线对无关;
+//           兼容旧约定 {1,1}。
+//   测向刀: 参考天线(通道1)固定为天线 1, 通道2 在天线 2..7 间循环切换。
+// 注意: 校正刀必须能映射成功 —— 映射失败时 GN902::SetData 会整帧丢弃,
+//       轮边界判定(见下方 SetData 中 cut==0 的判断)永不触发, Detect()/Doa()
+//       一次都不执行, 表现为"完全没有输出"。改天线对约定时这里必须同步。
 static int mapPairToCutIndex(int cutIdx_1, int cutIdx_2)
 {
+    if (cutIdx_1 == 7 && cutIdx_2 == 7)
+    {
+        return 0; // 校正刀
+    }
     if (cutIdx_1 == 1 && cutIdx_2 >= 1 && cutIdx_2 <= 7)
     {
-        return cutIdx_2 - 1;
+        return cutIdx_2 - 1; // {1,1}=旧约定校正刀(0), {1,2}..{1,7}=六测向刀(1..6)
     }
-    return -1;  // 非标准天线对(参考天线须为1)，忽略该帧
+    return -1;  // 非标准天线对，忽略该帧
 }
 
 // 固定基线相位差采集：天线对 {8,9}/{9,8} 时不参与循环切刀、不进入测向，
@@ -2467,6 +2510,92 @@ static void collectFixedPairPhaseDiff(GN902State *st, const GNSSData *data, int 
         fprintf(fp, "  PRN=%d, Sys=%d, Type=%d, Snr1=%.1f, Snr2=%.1f, PhaseDiff=%.6f周(%.2f度)\n",
                 s.i_Prn, s.i_Sys, s.i_Type, s.i_Snr1, s.i_Snr2,
                 s.i_phase_diff, s.i_phase_diff * 360.0);
+    }
+    fflush(fp);
+}
+
+// =============================================================================
+// 保存上位机传入算法的原始数据(SetData_GN902 入口逐帧落盘)
+// -----------------------------------------------------------------------------
+// 目的: 上位机直接调用 C 接口时, 逐帧记录"实际喂进算法的是什么"(天线对/切刀序号、
+//       两端口卫星数、逐星字段), 便于与其自身源数据比对, 排查"每刀只喂最后一秒、
+//       缺刀、天线对不符"这类问题。
+// 与 SpoofingDoa::saveGNSSData(PublicSpace::saveArrayToBinary, 二进制、按轮组批后)
+// 是两回事: 本函数在接口入口处记录, 因此也包含被引擎忽略的非标准天线对帧。
+// 由 gn902_config.txt 的 save_data_enable / save_data_path 控制, 默认关闭。
+// 文本、追加模式; 首次写入时打印一段文件头。
+// =============================================================================
+static void saveInputGnssData(GN902State *st, const GNSSData *data, int cutIdx_1, int cutIdx_2)
+{
+    if (st == 0 || data == 0 || !g_gn902Cfg.saveDataEnable)
+    {
+        return;
+    }
+
+    char ts[32] = {0};
+    std::time_t now = std::time(0);
+    std::tm *lt = std::localtime(&now);
+    if (lt != 0)
+    {
+        std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", lt);
+    }
+
+    if (st->inputDataFp == 0)
+    {
+        st->inputDataFp = fopen(g_gn902Cfg.saveDataPath.c_str(), "a");
+        if (st->inputDataFp == 0)
+        {
+            std::cerr << "[GN902] 无法打开原始输入数据文件: "
+                      << g_gn902Cfg.saveDataPath << std::endl;
+            return;
+        }
+        fprintf(st->inputDataFp,
+                "=== GN902 原始输入数据(SetData_GN902 入口逐帧记录) ===\n"
+                "    起始时间=%s sizeof(SatelliteData)=%d sizeof(GNSSData)=%d\n"
+                "    帧行: [帧序号] 时间 天线对=(通道1,通道2) 切刀序号 帧类型 双端口卫星数\n"
+                "    星行: 端口Prn Sys Type Snr Psr Phase Dop SpoofFlag\n"
+                "========================================================\n",
+                ts, (int)sizeof(SatelliteData), (int)sizeof(GNSSData));
+    }
+
+    FILE *fp = st->inputDataFp;
+    long long idx = ++st->inputDataCount;
+
+    // 切刀序号(0=校正刀, 1..6=六测向刀, -1=非标准天线对 => 引擎忽略该帧)
+    int cut = mapPairToCutIndex(cutIdx_1, cutIdx_2);
+    const char *kind = "";
+    if ((cutIdx_1 == 8 && cutIdx_2 == 9) || (cutIdx_1 == 9 && cutIdx_2 == 8))
+    {
+        kind = " 固定基线采集";
+    }
+    else if (cut < 0)
+    {
+        kind = " 非标准天线对(引擎忽略)";
+    }
+    else if (cut == 0)
+    {
+        kind = " 校正刀";
+    }
+
+    // 越界夹紧: 引擎侧同样按 GN902_MAX_PORT_SAT 夹紧, 这里只是防止按非法计数遍历
+    int n1 = data->i_PortOneNum;
+    int n2 = data->i_PortTwoNum;
+    if (n1 < 0 || n1 > GN902_MAX_PORT_SAT) { n1 = (n1 < 0) ? 0 : GN902_MAX_PORT_SAT; }
+    if (n2 < 0 || n2 > GN902_MAX_PORT_SAT) { n2 = (n2 < 0) ? 0 : GN902_MAX_PORT_SAT; }
+
+    fprintf(fp, "[%lld] %s 天线对=(%d,%d) 切刀=%d%s 通道1卫星数=%d 通道2卫星数=%d\n",
+            idx, ts, cutIdx_1, cutIdx_2, cut, kind, n1, n2);
+    for (int i = 0; i < n1; ++i)
+    {
+        const SatelliteData &s = data->i_PortOne[i];
+        fprintf(fp, "    1: Prn=%d Sys=%d Type=%d Snr=%.1f Psr=%.3f Phase=%.3f Dop=%.3f SpoofFlag=%d\n",
+                s.i_Prn, s.i_Sys, s.i_Type, s.i_Snr, s.i_Psr, s.i_Phase, s.i_Dop, s.i_SpoofingFlag);
+    }
+    for (int i = 0; i < n2; ++i)
+    {
+        const SatelliteData &s = data->i_PortTwo[i];
+        fprintf(fp, "    2: Prn=%d Sys=%d Type=%d Snr=%.1f Psr=%.3f Phase=%.3f Dop=%.3f SpoofFlag=%d\n",
+                s.i_Prn, s.i_Sys, s.i_Type, s.i_Snr, s.i_Psr, s.i_Phase, s.i_Dop, s.i_SpoofingFlag);
     }
     fflush(fp);
 }
@@ -2576,6 +2705,9 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2){
     {
         return;
     }
+    // ★ 保存上位机传入的原始帧(由 gn902_config.txt 的 save_data_enable 控制, 默认关闭)
+    //   放在天线对判定之前: 被引擎忽略的帧也要记录, 否则"缺刀/天线对不符"看不出来。
+    saveInputGnssData(st, data, cutIdx_1, cutIdx_2);
     // 特殊天线对 {8,9}/{9,8}：固定基线采集相位差，不参与循环切刀、不进入测向。
     if ((cutIdx_1 == 8 && cutIdx_2 == 9) || (cutIdx_1 == 9 && cutIdx_2 == 8))
     {
