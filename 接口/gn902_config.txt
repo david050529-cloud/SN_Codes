@@ -20,7 +20,7 @@
 log_enable=1
 log_path=./gn902_doa.txt
 
-save_data_enable=0
+save_data_enable=1
 save_data_path=./gn902_input.log
 
 # 注意: 连续切刀数(连续报警确认次数)已改为通过接口 SetCutnumThreshold_GN902 传入，

@@ -58,7 +58,7 @@ int Create_GN902(int & id){
 
 // 设置阈值
 int SetThresholdDetection_GN902(int id,
-                                double satelliteCountThreshold,
+                                int satelliteCountThreshold,
                                 double phsDiffThreshold,
                                 int sysEnum,
                                 int typeEnum){

@@ -18,7 +18,7 @@ GN902_EXTERN_C int Create_GN902(int &id);
 
 GN902_EXTERN_C int SetThresholdDetection_GN902(
     int id,
-    double satelliteCountThreshold,
+    int satelliteCountThreshold,
     double phsDiffThreshold,
     int sysEnum,
     int typeEnum);
