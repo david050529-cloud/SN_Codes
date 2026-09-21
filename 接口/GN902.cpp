@@ -1089,17 +1089,32 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             }
         }
 
+        // =====================================================================
+        // ★ 修复: 某频点本次切刀不再报警时, 立即清空其"报警结果"与"跟踪状态",
+        //         避免该频点不报警后还一直以 i_Alarm=1 出现在 GetResult 里。
+        //   说明:
+        //     - m_ConsecutiveAlarm 保留条目, 只把计数清零 (在迭代中删 map 条目
+        //       会破坏 range-for 迭代器);
+        //     - m_Tracking / m_Baselines / m_AngleResultData / m_Max_Snr 中
+        //       与该频点相关的历史数据一并擦除;
+        //     - 后续若该频点再次连续报警达到 m_Detection_Recodds_Num,
+        //       会重新进入 m_Tracking, 重新上报。
+        // =====================================================================
         for (auto &kv : m_ConsecutiveAlarm)
         {
-            if (cutAlarms.find(kv.first) == cutAlarms.end())
+            int typeInt = kv.first;
+            if (cutAlarms.find(typeInt) == cutAlarms.end())
             {
                 kv.second = 0;
-                if (m_Tracking.find(kv.first) == m_Tracking.end())
-                {
-                    m_Baselines.erase(kv.first);
-                }
+
+                m_Tracking.erase(typeInt);
+                m_Baselines.erase(typeInt);
+                m_AngleResultData.erase(typeInt);
+                m_Max_Snr.erase(typeInt);   // 可选: 若希望保留历史最大 SNR 可去掉这行
             }
         }
+
+        // 累积连续报警计数 -> 达到阈值后纳入跟踪
         for (auto &kv : cutAlarms)
         {
             int typeInt = kv.first;
@@ -1108,13 +1123,13 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             if (c >= m_Detection_Recodds_Num)
             {
                 TrackingInfo &t = m_Tracking[typeInt];
-                for (int sid : kv.second)
-                {
-                    t.cluster_sats.insert(sid);
-                }
+                // 用当前切刀的报警卫星集合替换, 保证 cluster_sats 反映"当前"报警卫星,
+                // 而不是历史累积的并集 (若需保留累积语义, 改回 insert 亦可)。
+                t.cluster_sats = kv.second;
             }
         }
 
+        // 过滤出本切刀参与后续处理的报警卫星
         vector<SatelliteDataPhaseDiffA> filtered;
         for (auto &sat : dataA[j])
         {
@@ -1133,6 +1148,7 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             continue;
         }
 
+        // 单切刀累积基线 (仅供本切刀报警频点使用)
         {
             vector<vector<SatelliteDataPhaseDiffA>> oneCut(cutNum);
             oneCut[j] = filtered;
@@ -1144,6 +1160,7 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             accumulateBaselines(cutDataB);
         }
 
+        // 每个报警频点生成一条 AlarmMoment
         for (auto &kv : cutAlarms)
         {
             int typeInt = kv.first;
@@ -1216,7 +1233,6 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
         }
     }
 }
-
 const std::vector<AlarmMoment> &SpoofingDoa::getAlarmMoments(void) const
 {
     return m_AlarmMoments;
