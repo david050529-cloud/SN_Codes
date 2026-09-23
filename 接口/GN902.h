@@ -524,6 +524,14 @@ public:
      */
     void configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR);
 
+    /**
+     * @brief 重置增量检测状态（用于每次切刀到达时基于累积数据重新计算）
+     * @note 清空连续报警计数、跟踪状态、跨周期基线、报警时刻、
+     *       测向结果与信噪比缓存，使下一次 setGNSSData 从干净状态重新计算。
+     *       由 GN902::Detect 在每次组批喂入前调用，避免同一份切刀数据被重复计数。
+     */
+    void resetDetectionStateForRecompute(void);
+
 private:
     // ---- PreparationData.cpp: 数据预处理 ----
     void getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA, bool snrFilter = true);

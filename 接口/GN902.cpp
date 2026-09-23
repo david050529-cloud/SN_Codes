@@ -1056,6 +1056,16 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
                      m_Cyclic_Detection_Flag, m_OneCut_Frams, m_Smooth_Flag, m_omni_R);
 }
 
+void SpoofingDoa::resetDetectionStateForRecompute(void)
+{
+    m_ConsecutiveAlarm.clear();
+    m_Tracking.clear();
+    m_Baselines.clear();
+    m_AlarmMoments.clear();
+    m_AngleResultData.clear();
+    m_Max_Snr.clear();
+}
+
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
@@ -2735,6 +2745,12 @@ void GN902::SetCutnumThreshold(int thresholdCount){
 // @param data 数据指针
 // @param cutIdx_1 通道1天线索引(参考天线，固定为1)
 // @param cutIdx_2 通道2天线索引(1=校正, 2..7=六测向刀)
+//
+// ★ 修改要点：
+//   1) 每收到一个测向切刀(cut=1..6)即立刻用已累积的全部切刀数据重新计算，
+//      立即更新 st->result，从而 GetResult_GN902 每次调用都能拿到最新结果。
+//   2) 六测向刀全部到齐才清空本轮缓冲区，等待下一轮。
+//   3) 校正刀只累积，不触发重算（等下一次测向切刀到来时一并参与）。
 void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
     if (it == g_gn902State.end())
@@ -2748,14 +2764,15 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2){
         return;
     }
     // ★ 保存上位机传入的原始帧(由 gn902_config.txt 的 save_data_enable 控制, 默认关闭)
-    //   放在天线对判定之前: 被引擎忽略的帧也要记录, 否则"缺刀/天线对不符"看不出来。
     saveInputGnssData(st, data, cutIdx_1, cutIdx_2);
+
     // 特殊天线对 {8,9}/{9,8}：固定基线采集相位差，不参与循环切刀、不进入测向。
     if ((cutIdx_1 == 8 && cutIdx_2 == 9) || (cutIdx_1 == 9 && cutIdx_2 == 8))
     {
         collectFixedPairPhaseDiff(st, data, cutIdx_1, cutIdx_2);
         return;
     }
+
     // 天线对 -> 切刀序号(0=校正{7,7}, 1..6=测向{1,2}..{1,7})；非标准对忽略该帧
     int cut = mapPairToCutIndex(cutIdx_1, cutIdx_2);
     if (cut < 0)
@@ -2763,51 +2780,57 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2){
         return;
     }
 
-    // 一轮结束的处理: 组批喂入引擎 -> 取测向结果 -> 清空本轮缓冲。
-    // 清空 buf/cutIndex 是必须的: 缓冲若跨轮累积, Detect() 里的 C(每刀帧数)会
-    // 涨到几十, 各帧来自不同轮, 时间上不连贯, 检测聚不到一起。
-    auto finishRound = [&]()
+    // ★ 新一轮起点兜底：校正刀出现且缓冲区非空、上一帧不是校正刀
+    //   说明上一轮六测向刀没凑齐（缺刀/乱序），丢弃残局，从本轮重新开始。
+    //   注意: 这里只清缓冲，不动 st->result —— 保留上一次成功算出的结果。
+    if (cut == 0 && st->curCut != 0 && !st->buf.empty())
     {
-        Detect();
-        Doa();
+        GN902Log("SetData: 校正刀作为新一轮起点，丢弃上一轮残留缓冲(bufSize=%d)。\n",
+                 (int)st->buf.size());
         st->buf.clear();
         st->cutIndex.clear();
         st->doaMask = 0;
-    };
-
-    // 轮边界(兜底)：校正刀(天线对{7,7})再次出现且上一帧非校正刀时，
-    // 说明上一轮已结束。上位机切刀顺序异常(缺刀/乱序)导致六刀掩码凑不齐时，
-    // 靠这一条兜底, 避免 Detect()/Doa() 一次都不执行。
-    if (cut == 0 && st->curCut != 0 && !st->buf.empty())
-    {
-        finishRound();
     }
+
     st->curCut = cut;
     st->buf.push_back(*data);
     st->cutIndex.push_back(cut);
 
-    // 轮边界(主)：六测向刀 cut=1..6 全部到达即一轮结束。
-    // 校正刀(cut=0)只负责刷新 st->calFrames, 不再承担轮边界职责 ——
-    // 设备上校正刀几十轮才来一次, 以它为边界会让检测/测向几乎不执行。
-    bool roundDone = false;
     if (cut >= 1 && cut <= 6)
     {
+        // 累积"六测向刀到齐"掩码
         st->doaMask |= (1 << cut);
-        roundDone = (st->doaMask == 0x7E);
+
+        GN902Log("SetData: pair=(%d,%d) cut=%d doaMask=0x%02X bufSize=%d "
+                 "PortOneNum=%d PortTwoNum=%d -> 立即重算检测+测向\n",
+                 cutIdx_1, cutIdx_2, cut, st->doaMask, (int)st->buf.size(),
+                 data->i_PortOneNum, data->i_PortTwoNum);
+
+        // ★ 核心修改：每到达一个测向切刀 → 立即用已累积数据重算，刷新 st->result
+        Detect();   // 组批并喂入引擎（含本切刀），引擎内部会重算检测/基线/报警时刻
+        Doa();      // 从引擎取出最新测向结果，写入 st->result
+
+        // ★ 六测向刀全部到齐 → 本轮结束，清空缓冲，等待下一轮
+        if (st->doaMask == 0x7E)
+        {
+            GN902Log("SetData: 六测向刀全部到齐，本轮结束，result.i_Count=%d，清空缓冲。\n",
+                     st->result.i_Count);
+            st->buf.clear();
+            st->cutIndex.clear();
+            st->doaMask = 0;
+            st->curCut = -1;
+        }
     }
-
-    // ★ 独立日志记录一帧到达(doaMask = 收到本帧后的掩码, 0x7E 即六刀到齐)
-    GN902Log("SetData: pair=(%d,%d) cut=%d doaMask=0x%02X roundDone=%d PortOneNum=%d PortTwoNum=%d\n",
-             cutIdx_1, cutIdx_2, cut, st->doaMask, (int)roundDone,
-             data->i_PortOneNum, data->i_PortTwoNum);
-
-    if (roundDone)
+    else
     {
-        finishRound();
+        // 校正刀：仅累积到缓冲区，等下一次测向切刀到来时一起参与计算
+        GN902Log("SetData: pair=(%d,%d) cut=%d (校正刀) bufSize=%d "
+                 "PortOneNum=%d PortTwoNum=%d\n",
+                 cutIdx_1, cutIdx_2, cut, (int)st->buf.size(),
+                 data->i_PortOneNum, data->i_PortTwoNum);
     }
     return;
 }
-
 // 获取结果
 void GN902::GetResult(SpoofingResult& result){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
@@ -2846,7 +2869,11 @@ void GN902::GetAlarmMoments(std::vector<AlarmMoment>& out){
     return;
 }
 
-// 检测
+// 检测: 基于当前缓冲区(保留)组批并喂入引擎
+// ★ 修改要点：
+//   1) 不再 swap 缓冲区，而是拷贝 —— 原缓冲区保留，供后续切刀继续累积。
+//   2) 每次喂入前调用 resetDetectionStateForRecompute()，清空引擎的增量检测
+//      状态，避免"同一份切刀数据被重复计数"（因为现在每一刀都用累积数据重算）。
 void GN902::Detect(){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
     if (it == g_gn902State.end() || it->second->eng == 0)
@@ -2855,11 +2882,9 @@ void GN902::Detect(){
     }
     GN902State *st = it->second;
 
-    // 取出本轮缓冲(swap 后引用安全)
-    std::vector<GNSSData> frameData;
-    std::vector<int> frameCuts;
-    frameData.swap(st->buf);
-    frameCuts.swap(st->cutIndex);
+    // ★ 拷贝缓冲区数据（保留原始缓冲区，供后续切刀继续累积）
+    std::vector<GNSSData> frameData = st->buf;
+    std::vector<int>     frameCuts = st->cutIndex;
 
     // 拆帧：cut=0 -> 校正刀；cut=1..6 -> 六刀测向刀
     std::vector<GNSSData> calNew;
@@ -2871,7 +2896,7 @@ void GN902::Detect(){
         {
             calNew.push_back(frameData[i]);
         }
-        else
+        else if (c >= 1 && c <= 6)
         {
             detByCut[c - 1].push_back((int)i);
         }
@@ -2882,26 +2907,17 @@ void GN902::Detect(){
     {
         st->calFrames = calNew;
     }
-    // 从未收到过校正刀({7,7}, 兼容旧约定 {1,1}) 时不再整轮丢弃:
-    // 存一帧全零 GNSSData(0 星)充当校正行, 让本轮照常组批。
-    //   引擎侧影响: setCorrectionData 找到的校正刀没有任何卫星 -> calCorrectionOffset
-    //   收不到样本 -> m_CorrectionData 保持不变, 等价于本轮不做通道校正。
-    //   相位差因此少了一个常量平移, 但该平移对同频所有卫星一致, 不影响相位差聚簇
-    //   检测 -> 报警与测向照常给出(测向角度带一个常量偏移)。
-    // 之所以要把这帧存进 calFrames 而不是用局部变量: 下面组批的 else 分支会退回到
-    // calRow = st->calFrames 并取 calRow.back(), 空 vector 取 back() 是未定义行为。
-    // 设备上校正刀几十轮才来一次, 若在这里直接 return, 开机后到第一把校正刀之间
-    // 的所有轮都静默无结果; 若设备根本不发校正刀, 则永远无结果。
+    // 从未收到过校正刀时用全零帧兜底，避免 calRow.back() 未定义行为
     if (st->calFrames.empty())
     {
         GNSSData noCal;
         memset(&noCal, 0, sizeof(noCal));
         st->calFrames.push_back(noCal);
         GN902Log("Detect: 无校正刀数据(calFrames empty) -> 用全零帧充当校正行, "
-                 "本轮不做通道校正。本轮帧数=%d\n", (int)frameCuts.size());
+                 "本轮不做通道校正。本轮缓冲帧数=%d\n", (int)frameCuts.size());
     }
 
-    // 测向轮缺刀不再整轮丢弃：缺失的测向刀用空帧补齐
+    // 六测向刀是否全部到齐
     GNSSData emptyCut;
     memset(&emptyCut, 0, sizeof(emptyCut));
     bool cutComplete = true;
@@ -2926,11 +2942,8 @@ void GN902::Detect(){
         }
     }
 
-    // batch 大小 = 7*C，会被引擎内部的 SatelliteDataPhaseDiffB 逐帧写入
-    // 长度 100 的栈数组(见 getSatelliteDataPhaseDiffB)。必须保证 7*C <= 100。
-    // 硬上限只作防御: 正常情况下每轮结束即清空缓冲, C 就是"本轮每刀位的帧数"。
-    // 一旦真的截断, 说明缓冲仍在跨轮累积(轮边界没触发), 日志里必须能看出来。
-    const int MAX_C = 14;  // 7*14 = 98 <= 100
+    // batch 上限防御: 7*C <= 100
+    const int MAX_C = 14;
     bool truncated = false;
     if (detUniform && C > MAX_C)
     {
@@ -2943,7 +2956,7 @@ void GN902::Detect(){
         truncated = true;
     }
 
-    // 校正行：六刀帧数统一为 C 时，校正帧数也必须凑满 C 帧。
+    // 校正行：六刀帧数统一为 C 时，校正帧数也必须凑满 C 帧
     std::vector<GNSSData> calRow;
     if (detUniform && C > 0)
     {
@@ -2953,11 +2966,6 @@ void GN902::Detect(){
         }
         else
         {
-            // 校正帧不足 C: 用最近一帧校正复制 C 份填满, 仍然走标准多帧路径。
-            // 此处若退化为单帧路径(uniform=false), oneCutFrams=1/smooth=false,
-            // 本轮 C 帧会被压成 7 帧拼批, 各刀位不同轮的数据拼在一起, 检测聚不到一起。
-            // 代价: 复制校正会放大校正误差 —— 配合"每轮结束即清空缓冲"使用, C 天然
-            //       就是本轮每刀位的帧数(通常 1), 该分支只在上位机重复喂同一刀位时走到。
             calRow.assign((size_t)C, st->calFrames.back());
         }
     }
@@ -2966,9 +2974,8 @@ void GN902::Detect(){
         calRow = st->calFrames;
     }
 
-    // C == 0 时(六刀均无帧)才允许退化为单帧路径
     bool uniform = detUniform && (C > 0) && ((int)calRow.size() == C);
-    int oneCutFrams = uniform ? C : 1;
+    int  oneCutFrams = uniform ? C : 1;
     bool smooth = uniform;
 
     // 按引擎行序组批
@@ -3006,16 +3013,20 @@ void GN902::Detect(){
     }
 
     // ★ 独立日志记录本轮组批信息
-    //   C = 本轮每个刀位的帧数(轮结束后缓冲已清空, 因此不会跨轮累积);
-    //   uniform=1 表示走标准多帧路径, batchSize 应为 7*C(7 <= batchSize <= 98)。
-    GN902Log("Detect: batchSize=%d uniform=%d C=%d oneCutFrams=%d smooth=%d cutComplete=%d truncated=%d calFrames=%d\n",
+    GN902Log("Detect: batchSize=%d uniform=%d C=%d oneCutFrams=%d smooth=%d "
+             "cutComplete=%d truncated=%d calFrames=%d bufSize=%d\n",
              (int)batch.size(), (int)uniform, C, oneCutFrams, (int)smooth,
-             (int)cutComplete, (int)truncated, (int)st->calFrames.size());
+             (int)cutComplete, (int)truncated, (int)st->calFrames.size(),
+             (int)st->buf.size());
+
+    // ★ 每次重新计算前清空引擎的增量状态，避免同一份数据被重复计数
+    st->eng->resetDetectionStateForRecompute();
 
     st->eng->configCyclicRuntime(true, oneCutFrams, smooth, 0.0);
     st->eng->setGNSSData(batch.data(), (int)batch.size());
     return;
 }
+
 // 测向
 void GN902::Doa(){
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
