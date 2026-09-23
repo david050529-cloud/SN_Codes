@@ -742,9 +742,15 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
     }
 }
 
-void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoData)
+void SpoofingDoa::calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoData, bool replaceAll)
 {
-    m_AngleResultData.clear();
+    // replaceAll=false 用于"某频点相位差刚更新 -> 只重算该频点"的增量测向:
+    // 此时必须保留其它频点已有的测向结果, 否则每算一个频点就把前面的结果清掉,
+    // 整轮结束后只剩最后一个报警时刻 / 最后一个频点的结果。
+    if (replaceAll)
+    {
+        m_AngleResultData.clear();
+    }
     int typeInt = 0;
     int prn = 0;
     map<int, InterferInfo> tp;
@@ -1035,6 +1041,30 @@ void SpoofingDoa::resetCyclicDetection(void)
     m_Baselines.clear();
 }
 
+/**
+ * @brief 清空某频点的全部欺骗状态(要求2: 不给出报警之后清空对应频点的数据)
+ * @param typeInt 频点编码(sys*100+type)
+ *
+ * 清空内容:
+ *   - m_Baselines[typeInt]       跨周期累积的相位差数据
+ *   - m_Tracking[typeInt]        测向结果(被欺骗卫星簇 + 角度/质量)
+ *   - m_AngleResultData[typeInt] 测向结果明细(各星角度/质量)
+ *   - m_Max_Snr[typeInt]         测向过程中保存的逐星载噪比
+ *   - m_ConsecutiveAlarm[typeInt] 连续报警计数
+ *
+ * 不在这里清对外结果: GN902State::result 由 GN902::GetResult 只读返回(不做任何清空),
+ * 它在每轮结束时由 Doa() 依据引擎的 m_Tracking 重建 —— 该频点已不在 m_Tracking 中,
+ * 重建后自然不再出现在结果里, 上位机下一轮拿到的就是"该频点已消失"的结果。
+ */
+void SpoofingDoa::clearTypeState(int typeInt)
+{
+    m_Baselines.erase(typeInt);
+    m_Tracking.erase(typeInt);
+    m_AngleResultData.erase(typeInt);
+    m_Max_Snr.erase(typeInt);
+    m_ConsecutiveAlarm.erase(typeInt);
+}
+
 void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR)
 {
     m_Cyclic_Detection_Flag = cyclic ? 1 : 0;
@@ -1089,16 +1119,24 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             }
         }
 
-        for (auto &kv : m_ConsecutiveAlarm)
+        // ★ 本切刀"不给出报警"的频点: 清空该频点已累积的全部数据(要求2)。
+        //   原实现只把连续报警计数归零, 且仅当该频点未被跟踪时才丢掉基线 ——
+        //   一旦进入跟踪, 基线就在跨轮累积里一直留着, 上一次欺骗事件的相位差
+        //   和角度会被带进下一次事件, 表现为"欺骗早就没了, 角度还在报"。
+        //   现在不给出报警即视为本次欺骗事件结束, 相位差与测向结果一起清掉。
+        //   先收集 key 再清: clearTypeState 会 erase m_ConsecutiveAlarm 自身,
+        //   不能在遍历 m_ConsecutiveAlarm 的过程中直接调它。
+        std::vector<int> noAlarmTypes;
+        for (const auto &kv : m_ConsecutiveAlarm)
         {
             if (cutAlarms.find(kv.first) == cutAlarms.end())
             {
-                kv.second = 0;
-                if (m_Tracking.find(kv.first) == m_Tracking.end())
-                {
-                    m_Baselines.erase(kv.first);
-                }
+                noAlarmTypes.emplace_back(kv.first);
             }
+        }
+        for (size_t i = 0; i < noAlarmTypes.size(); ++i)
+        {
+            clearTypeState(noAlarmTypes[i]);
         }
         for (auto &kv : cutAlarms)
         {
@@ -1159,10 +1197,13 @@ void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDi
             vector<SatelliteDataPhaseDiffB> doaDataB;
             getCrossCycleDataBByType(typeInt, kv.second, doaDataB);
 
-            m_AngleResultData.clear();
+            // ★ 要求1: 该频点的相位差刚在上面 accumulateBaselines 更新过 -> 立即重测向一次。
+            //   走增量测向(calAngle replaceAll=false): 只覆盖本频点结果, 不清掉其它频点
+            //   已经算出来的结果; 原先是 m_AngleResultData.clear() + 全量重算, 每算一个
+            //   频点就把前面的清光, 整轮只剩下最后一个报警时刻的结果。
             if (!doaDataB.empty())
             {
-                getResultInterferDoa(doaDataB);
+                getResultInterferDoaByType(doaDataB);
             }
 
             const vector<AlarmData> *alarms = 0;
@@ -1823,7 +1864,24 @@ void SpoofingDoa::getResultInterferDoa(vector<SatelliteDataPhaseDiffB> dataB)
     setInterferInfoDataOmni(dataB, inferInfoData);
     nowT = getNowTime();
     PublicSpace::Log("cal angle    %s\n", nowT.c_str());
+    // 全量测向: 重建全部频点的结果(整轮流程 / 非循环切刀流程使用)
     calAngle(inferInfoData);
+}
+
+void SpoofingDoa::getResultInterferDoaByType(vector<SatelliteDataPhaseDiffB> dataB)
+{
+    if (dataB.empty())
+    {
+        return;
+    }
+    string nowT = getNowTime();
+    std::map<int, std::map<int, InterferInfo>> inferInfoData;
+    PublicSpace::Log("set Interfer Info Data Omni   %s\n", nowT.c_str());
+    setInterferInfoDataOmni(dataB, inferInfoData);
+    nowT = getNowTime();
+    PublicSpace::Log("cal angle    %s\n", nowT.c_str());
+    // 增量测向: 只覆盖 dataB 涉及的频点, 其它频点的测向结果原样保留
+    calAngle(inferInfoData, false);
 }
 
 void SpoofingDoa::initTheory(void){

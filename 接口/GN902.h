@@ -547,6 +547,16 @@ private:
 
     // ---- Interfer.cpp: 相关干涉仪测向 ----
     void getResultInterferDoa(vector<SatelliteDataPhaseDiffB> dataB);
+
+    /**
+     * @brief 增量测向: 只重算 dataB 涉及的频点的测向结果, 保留其它频点已有结果
+     * @param dataB 某频点刚更新过的跨周期累积基线
+     * @note 对应"每更新一次欺骗信号的相位差数据就更新一次测向结果": 一个频点重新
+     *       测向, 不得把其它频点已经算出来的结果清掉(calAngle 整表清空的老行为
+     *       会让整轮只剩下最后一个报警时刻的结果)。
+     */
+    void getResultInterferDoaByType(vector<SatelliteDataPhaseDiffB> dataB);
+
     void initTheory(void);
 
     // ---- Alarm.cpp: 欺骗检测与告警 ----
@@ -560,7 +570,14 @@ private:
     void calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA);
     void getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     void setSpoofingResult(SpoofingResult &result);
-    void calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoData);
+
+    /**
+     * @brief 相关干涉仪测向, 各星测向结果写入 m_AngleResultData
+     * @param inferInfoData 各频点/各星的测向输入
+     * @param replaceAll    true = 先清空 m_AngleResultData 再整体重建(整轮全量测向);
+     *                      false = 只覆盖 inferInfoData 涉及的频点, 其它频点结果保留
+     */
+    void calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoData, bool replaceAll = true);
 
     /**
      * @brief 取某频点某星的载噪比(用于报警卫星明细)
@@ -581,6 +598,18 @@ private:
 
     // ---- 循环切刀检测流程（对应 Python detection_main.py / detection_lib.py）----
     void resetCyclicDetection(void);
+
+    /**
+     * @brief 清空某频点的全部欺骗状态: 相位差基线、测向结果及其保存的中间数据
+     * @param typeInt 频点编码(sys*100+type)
+     * @note 该频点"不给出报警"时调用(见 getCyclicDetectionData): 视为本次欺骗事件
+     *       已结束, 下次再报警时从零重新累积基线、重新测向, 不会把上一次事件的
+     *       相位差/角度带进新事件。
+     *       只清引擎内部状态; 对外的 SpoofingResult 由 GetResult 只读返回, 不在这里
+     *       也不在 GetResult 里清 —— 该频点已不在 m_Tracking 中, 下一轮结束时自然消失。
+     */
+    void clearTypeState(int typeInt);
+
     void getCyclicDetectionData(std::vector<std::vector<SatelliteDataPhaseDiffA>> &dataA);
     void accumulateBaselines(const std::vector<SatelliteDataPhaseDiffB> &dataB);
     void getCrossCycleDataB(std::vector<SatelliteDataPhaseDiffB> &doaDataB);
@@ -744,6 +773,10 @@ public:
     /**
      * @brief 取最近一轮测向结果
      * @param result 输出结果
+     * @note 只读返回, 不做任何清空(可重复调用取到同样的结果)。"某频点不再报警
+     *       就清空该频点的相位差与测向结果"是在引擎侧完成的(见
+     *       SpoofingDoa::clearTypeState), 不要挪到这里: 一旦 GetResult 顺手清结果,
+     *       重复调用就会拿到空结果, 且上位机的读取时序会直接影响算法状态。
      */
     void GetResult(SpoofingResult& result);
 
