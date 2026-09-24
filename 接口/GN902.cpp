@@ -640,16 +640,31 @@ void SpoofingDoa::setDataAngle(const GNSSData *data, int dataLen)
     dataA.clear();
     vector<vector<SatelliteDataPhaseDiffA>>().swap(dataA);
 
-    for (int i = 0; i < dataLen; i++){
-        PublicSpace::Log("cut: %d   PortOneNum: %d PortTwoNum: %d  \n", i + 1, data[i].i_PortOneNum, data[i].i_PortTwoNum);
+int cutNum = (int)m_cutSequence.size();
+int framesPerCut = m_OneCut_Frams;
+if (dataLen != cutNum * framesPerCut) {
+    // 兼容旧的单帧模式
+    if (dataLen == cutNum) {
+        framesPerCut = 1;
+    } else {
+        PublicSpace::Log("error: setDataAngle dataLen=%d, expected=%d\n", dataLen, cutNum * framesPerCut);
+        return;
+    }
+}
+for (int cut = 0; cut < cutNum; ++cut) {
+    bool isCalCut = (m_cutSequence[cut][0] == m_cutSequence[cut][1]);
+    for (int f = 0; f < framesPerCut; ++f) {
+        int idx = cut * framesPerCut + f;
+        PublicSpace::Log("cut: %d frame: %d   PortOneNum: %d PortTwoNum: %d  \n",
+                         cut + 1, f + 1, data[idx].i_PortOneNum, data[idx].i_PortTwoNum);
         vector<SatelliteDataPhaseDiffA> tp;
         tp.clear();
         vector<SatelliteDataPhaseDiffA>().swap(tp);
-        bool isCalCut = (i < (int)m_cutSequence.size() && m_cutSequence[i][0] == m_cutSequence[i][1]);
-        getSatelliteDataPhaseDiffA(data[i], tp, !isCalCut);
+        getSatelliteDataPhaseDiffA(data[idx], tp, !isCalCut);
         dataA.emplace_back(tp);
-        LogGNSSData(data[i], i + 1);
+        LogGNSSData(data[idx], idx + 1);
     }
+}
 
     if (0 != m_logFlg){
         vector<SatelliteDataPhaseDiffB> tpB;
@@ -2426,18 +2441,17 @@ void GN902Log(const char *fmt, ...)
 namespace {
 struct GN902State
 {
-    SpoofingDoa *eng;                // 欺骗检测+测向引擎(循环切刀)
-    GNSSData cutFrames[6];           // 对应 cut=1..6 的最新数据
-    bool cutReceived[6];             // 标记 cut=1..6 是否已收到
-    std::vector<GNSSData> calFrames; // 储存的校正刀数据(只保留最近一帧)
-    SpoofingResult result;           // 最近一轮测向结果
-    FILE *phaseDiffFp;               // 固定基线相位差采集日志(追加模式)
-    FILE *inputDataFp;               // 原始输入数据保存文件(追加模式, 0=未打开)
-    long long inputDataCount;        // 已保存的输入帧数
+    SpoofingDoa *eng;                         // 欺骗检测+测向引擎
+    std::vector<GNSSData> currentCutBuf[7];   // 索引0=校正刀，1..6=测向刀，当前正在接收的帧
+    std::vector<GNSSData> completeCutData[7]; // 每个刀最近一次完整的8帧数据
+    int lastCut;                              // 上一次处理的 cut 索引，用于检测刀变化
+    SpoofingResult result;                    // 最近一轮测向结果
+    FILE *phaseDiffFp;                        // 固定基线相位差采集日志
+    FILE *inputDataFp;                        // 原始输入数据保存文件
+    long long inputDataCount;                 // 已保存的输入帧数
 
-    GN902State() : eng(0), phaseDiffFp(0), inputDataFp(0), inputDataCount(0)
+    GN902State() : eng(0), lastCut(-1), phaseDiffFp(0), inputDataFp(0), inputDataCount(0)
     {
-        for (int i = 0; i < 6; ++i) cutReceived[i] = false;
         clearResult();
     }
 
@@ -2755,76 +2769,49 @@ void GN902::SetCutnumThreshold(int thresholdCount){
 // @param data 数据指针
 // @param cutIdx_1 通道1天线索引(参考天线，固定为1)
 // @param cutIdx_2 通道2天线索引(1=校正, 2..7=六测向刀)
-void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2){
+void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
+{
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
-    if (it == g_gn902State.end())
-    {
-        return;
-    }
+    if (it == g_gn902State.end()) return;
     GN902State *st = it->second;
-    if (data == 0)
-    {
-        return;
-    }
+    if (data == 0) return;
 
-    // 保存上位机传入的原始帧(由 gn902_config.txt 控制, 默认关闭)
+    // 保存上位机传入的原始帧（由 gn902_config.txt 控制，默认关闭）
     saveInputGnssData(st, data, cutIdx_1, cutIdx_2);
 
-    // 特殊天线对 {8,9}/{9,8}：固定基线采集相位差，不参与循环切刀
+    // 固定基线采集 {8,9}/{9,8}
     if ((cutIdx_1 == 8 && cutIdx_2 == 9) || (cutIdx_1 == 9 && cutIdx_2 == 8))
     {
         collectFixedPairPhaseDiff(st, data, cutIdx_1, cutIdx_2);
         return;
     }
 
-    // 天线对 -> 切刀序号(0=校正刀, 1..6=六测向刀)
     int cut = mapPairToCutIndex(cutIdx_1, cutIdx_2);
-    if (cut < 0)
+    if (cut < 0) return;   // 非标准天线对，忽略
+
+    // ★ 检测切刀变化：当前 cut 与上一次不同，说明上一刀已结束
+    if (st->lastCut != -1 && st->lastCut != cut)
     {
-        return; // 非标准天线对，忽略
+        // 保存上一刀的完整 8 帧数据
+        st->completeCutData[st->lastCut] = st->currentCutBuf[st->lastCut];
+        st->currentCutBuf[st->lastCut].clear();
+
+        // 立即用所有刀的最新完整数据触发检测与测向
+        Detect();
+        Doa();
+    }
+    st->lastCut = cut;
+
+    // 将当前帧加入当前刀的缓冲区
+    std::vector<GNSSData>& buf = st->currentCutBuf[cut];
+    buf.push_back(*data);
+    if (buf.size() > 8)          // 每刀最多保留最近 8 帧
+    {
+        buf.erase(buf.begin());
     }
 
-    GN902Log("SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d\n",
-             cutIdx_1, cutIdx_2, cut, data->i_PortOneNum, data->i_PortTwoNum);
-
-    // 校正刀：只更新校正数据，不参与轮边界
-    if (cut == 0)
-    {
-        st->calFrames.clear();
-        st->calFrames.push_back(*data);
-        return;
-    }
-
-    // 测向刀 cut=1..6
-    if (cut >= 1 && cut <= 6)
-    {
-        st->cutFrames[cut - 1] = *data;
-        st->cutReceived[cut - 1] = true;
-
-        // 检查是否六个测向刀都已收到
-        bool allReceived = true;
-        for (int i = 0; i < 6; ++i)
-        {
-            if (!st->cutReceived[i])
-            {
-                allReceived = false;
-                break;
-            }
-        }
-
-        if (allReceived)
-        {
-            // 凑齐六刀，立即测向并更新结果
-            Detect(); // 组批并喂入引擎
-            Doa();    // 取测向结果到 st->result
-
-            // 清空测向刀接收标记，准备下一轮
-            for (int i = 0; i < 6; ++i)
-            {
-                st->cutReceived[i] = false;
-            }
-        }
-    }
+    GN902Log("SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d\n",
+             cutIdx_1, cutIdx_2, cut, data->i_PortOneNum, data->i_PortTwoNum, (int)buf.size());
 }
 
 // 获取结果
@@ -2866,40 +2853,48 @@ void GN902::GetAlarmMoments(std::vector<AlarmMoment>& out){
 }
 
 // 检测
-void GN902::Detect(){
+void GN902::Detect()
+{
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
-    if (it == g_gn902State.end() || it->second->eng == 0)
-    {
-        return;
-    }
+    if (it == g_gn902State.end() || it->second->eng == 0) return;
     GN902State *st = it->second;
 
-    // 构造 batch：校正刀 + 六个测向刀（按 cut=1..6 顺序）
     std::vector<GNSSData> batch;
-    batch.reserve(7);
+    const int FRAMES_PER_CUT = 8;
 
-    // 校正刀：取最近一帧；若从未收到过校正刀，则用空帧占位
-    if (!st->calFrames.empty())
+    // 按顺序：校正刀(0) 的 8 帧，刀1 的 8 帧，……，刀6 的 8 帧
+    for (int cut = 0; cut < 7; ++cut)
     {
-        batch.push_back(st->calFrames.back());
-    }
-    else
-    {
-        GNSSData emptyCal;
-        memset(&emptyCal, 0, sizeof(emptyCal));
-        batch.push_back(emptyCal);
+        const std::vector<GNSSData>& dataVec = st->completeCutData[cut];
+        if (dataVec.empty())
+        {
+            // 还没有完整数据，用空帧占位
+            GNSSData empty;
+            memset(&empty, 0, sizeof(empty));
+            for (int i = 0; i < FRAMES_PER_CUT; ++i)
+                batch.push_back(empty);
+        }
+        else
+        {
+            // 取最近的 8 帧（如果超过 8 帧，取后 8 帧）
+            size_t start = (dataVec.size() > FRAMES_PER_CUT) ? dataVec.size() - FRAMES_PER_CUT : 0;
+            for (size_t i = start; i < dataVec.size(); ++i)
+                batch.push_back(dataVec[i]);
+            // 不足 8 帧则补空帧
+            for (size_t i = dataVec.size() - start; i < FRAMES_PER_CUT; ++i)
+            {
+                GNSSData empty;
+                memset(&empty, 0, sizeof(empty));
+                batch.push_back(empty);
+            }
+        }
     }
 
-    for (int i = 0; i < 6; ++i)
-    {
-        batch.push_back(st->cutFrames[i]);
-    }
-
-    // 配置引擎：每刀一帧、不平滑
-    st->eng->configCyclicRuntime(true, 1, false, 0.0);
+    // 配置引擎：每刀 8 帧，开启平滑
+    st->eng->configCyclicRuntime(true, FRAMES_PER_CUT, true, 0.0);
     st->eng->setGNSSData(batch.data(), (int)batch.size());
 
-    GN902Log("Detect: batchSize=%d\n", (int)batch.size());
+    GN902Log("Detect: batchSize=%d (7 cuts * %d frames)\n", (int)batch.size(), FRAMES_PER_CUT);
 }
 
 // 测向
