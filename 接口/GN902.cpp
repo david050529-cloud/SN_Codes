@@ -418,7 +418,7 @@ double ArithmeticDoa::getDoaMass(const vector<double> diffTheory, const vector<d
 SpoofingDoa::SpoofingDoa(void){
     Init();
     setThresholdDetectionDoa(0, 2, 3, -1);    // GPS L5
-    setThresholdDetectionDoa(1, 0, 2, 30.0);   // GLONASS G1
+    setThresholdDetectionDoa(1, 0, 3, 30.0);   // GLONASS G1
     setThresholdDetectionDoa(1, 1, 3, 30.0);   // GLONASS G2
     setThresholdDetectionDoa(3, 2, 3, 5.0);   // Galileo E1C
     setThresholdDetectionDoa(3, 12, 3, 5.0);  // Galileo E5a
@@ -426,7 +426,7 @@ SpoofingDoa::SpoofingDoa(void){
     setThresholdDetectionDoa(4, 17, 3, -1);   // BDS B2I
     setThresholdDetectionDoa(4, 0, 3, -1);    // BDS B1I
     setThresholdDetectionDoa(4, 2, 3, -1);    // BDS B3I
-    setThresholdDetectionDoa(4, 8, 2, -1);    // BDS B1C
+    setThresholdDetectionDoa(4, 8, 3, -1);    // BDS B1C
     setThresholdDetectionDoa(4, 19, 3, -1);   // BDS B2b
     setThresholdDetectionDoa(4, 34, 3, 5.0);  // BDS B1X
 }
@@ -511,7 +511,7 @@ void SpoofingDoa::collectPhaseDiffData(const GNSSData &data, std::vector<Satelli
 int SpoofingDoa::getAngleSpoofingDoa(SpoofingResult &result)
 {
     setSpoofingResult(result);
-    cout << " changdu::"<< sizeof(SpoofingResult) << endl;
+    // cout << " changdu::"<< sizeof(SpoofingResult) << endl;
     PublicSpace::Log("Doa result:\n");
     LogSpoofingResult(result);
     return 0;
@@ -2738,9 +2738,6 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     eng->setThresholdDetectionDoa(sysEnum, typeEnum, (int)satelliteCountThreshold, phsDiffThreshold);
 
     // 注意: 连续切刀数 cutCountThreshold 不由本接口传入, 见 GN902::SetCutnumThreshold。
-    // ★ 末尾补 '\n': 原来用空格结尾, 多条日志会粘在同一行, 看起来像一条超长日志。
-    // ★ 用 %.3g 代替 %.3f: 配合上面的校验, 正常值打印不受影响; 即使异常大也不会打印几百位数字。
-    GN902Log("SetThresholdDetection: sys=%d type=%d phsDiff=%.3g satCount=%.3g\n",
     // ★ 末尾补 '\n': 原来用空格结尾, 多条日志会粘在同一行, 看起来像一条超长日志。
     // ★ 用 %.3g 代替 %.3f: 配合上面的校验, 正常值打印不受影响; 即使异常大也不会打印几百位数字。
     GN902Log("SetThresholdDetection: sys=%d type=%d phsDiff=%.3g satCount=%.3g\n",
