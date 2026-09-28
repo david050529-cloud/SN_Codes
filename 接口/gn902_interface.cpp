@@ -47,6 +47,8 @@ int Create_GN902(int & id){
         if(id == (int)GN902Container.size()){
             GN902Container.push_back(p);
         }
+        // ★ 把分配到的 id 回填给实例, 后续所有 GN902Log 都会带上这个 id
+        p->SetInstanceId(id);
     }
     catch(const std::exception& e){
         std::cout << "error:: create GN902 failed" << endl;
@@ -55,7 +57,6 @@ int Create_GN902(int & id){
     }
     return 0;
 }
-
 // 设置阈值
 int SetThresholdDetection_GN902(int id,
                                 int satelliteCountThreshold,

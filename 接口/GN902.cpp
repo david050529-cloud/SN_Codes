@@ -2624,28 +2624,29 @@ static void saveInputGnssData(GN902State *st, const GNSSData *data, int cutIdx_1
     fflush(fp);
 }
 
+// 回填实例 id, 并把"实例创建"日志移到这里打印, 以便带上真实 id
+void GN902::SetInstanceId(int id)
+{
+    m_InstanceId = id;
+    GN902Log("[ID=%d] === GN902 实例创建: cfg=%s logEnable=%d logPath=%s ===\n",
+             m_InstanceId,
+             g_gn902Cfg.cfgPath.empty() ? "(未找到)" : g_gn902Cfg.cfgPath.c_str(),
+             (int)g_gn902Cfg.logEnable,
+             g_gn902Cfg.logPath.c_str());
+}
+
 GN902::GN902(){
     GN902State *st = new GN902State();
-    // SpoofingDoa 构造即 Init()：运行参数已内置在引擎 Init() 中(不读配置文件)，
-    // 并按 Python 流程对齐各频点阈值。
     st->eng = new SpoofingDoa();
     if (st->eng != 0)
     {
-        // GN902 运行参数：循环切刀检测开、全向半径 0.1865m(重建理论模板)。
         st->eng->configCyclicRuntime(true, 0, false, 0.1865);
-        // 切刀顺序 = {7,7},{1,2},{1,3},{1,4},{1,5},{1,6},{1,7}
-        // (7 组天线对 = 校正刀 + 六刀测向，对齐 Python code 0/9/57/17/25/33/1)
         const int cutSeq[14] = {7, 7, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7};
         st->eng->setCutSquence(14, cutSeq);
     }
     g_gn902State[this] = st;
 
-    // ★ 加载独立日志配置(懒加载, 只执行一次)
     gn902LoadConfig();
-
-    // 注意: 连续切刀数 cutCountThreshold 已改为由接口 SetCutnumThreshold_GN902 传入
-    //       (见 GN902::SetCutnumThreshold)，此处不再从 txt 配置读取。
-    //       未调用该接口时, 引擎保持自身默认值(m_Detection_Recodds_Num=2)。
 
     if (g_gn902Cfg.cfgPath.empty())
     {
@@ -2658,12 +2659,7 @@ GN902::GN902(){
                   << " | 路径=" << g_gn902Cfg.logPath
                   << std::endl;
     }
-
-    // ★ 首次写入独立日志(若开启)，标记实例创建
-    GN902Log("=== GN902 实例创建: cfg=%s logEnable=%d logPath=%s ===\n",
-             g_gn902Cfg.cfgPath.empty() ? "(未找到)" : g_gn902Cfg.cfgPath.c_str(),
-             (int)g_gn902Cfg.logEnable,
-             g_gn902Cfg.logPath.c_str());
+    // ★ 原 "=== GN902 实例创建 ..." 已迁移到 SetInstanceId（此时 m_InstanceId 才有值）
 }
 
 GN902::~GN902(){
@@ -2697,17 +2693,17 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     //   合法范围: 相位差阈值 0~360 度, 卫星数阈值 0~GN902_MAX_PORT_SAT。
     if (!std::isfinite(phsDiffThreshold) || phsDiffThreshold < 0.0 || phsDiffThreshold > 360.0)
     {
-        GN902Log("SetThresholdDetection: INVALID phsDiff=%.3g (out of [0,360]), ignored. "
+        GN902Log("[ID=%d] SetThresholdDetection: INVALID phsDiff=%.3g (out of [0,360]), ignored. "
                  "sys=%d type=%d satCount=%.3g\n",
-                 phsDiffThreshold, sysEnum, typeEnum, satelliteCountThreshold);
+                 m_InstanceId, phsDiffThreshold, sysEnum, typeEnum, satelliteCountThreshold);
         return;
     }
     if (!std::isfinite(satelliteCountThreshold) || satelliteCountThreshold < 0.0 ||
         satelliteCountThreshold > (double)GN902_MAX_PORT_SAT)
     {
-        GN902Log("SetThresholdDetection: INVALID satCount=%.3g (out of [0,%d]), ignored. "
+        GN902Log("[ID=%d] SetThresholdDetection: INVALID satCount=%.3g (out of [0,%d]), ignored. "
                  "sys=%d type=%d phsDiff=%.3g\n",
-                 satelliteCountThreshold, GN902_MAX_PORT_SAT, sysEnum, typeEnum, phsDiffThreshold);
+                 m_InstanceId, satelliteCountThreshold, GN902_MAX_PORT_SAT, sysEnum, typeEnum, phsDiffThreshold);
         return;
     }
 
@@ -2719,17 +2715,17 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     //   合法范围: 相位差阈值 0~360 度, 卫星数阈值 0~GN902_MAX_PORT_SAT。
     if (!std::isfinite(phsDiffThreshold) || phsDiffThreshold < 0.0 || phsDiffThreshold > 360.0)
     {
-        GN902Log("SetThresholdDetection: INVALID phsDiff=%.3g (out of [0,360]), ignored. "
+        GN902Log("[ID=%d] SetThresholdDetection: INVALID phsDiff=%.3g (out of [0,360]), ignored. "
                  "sys=%d type=%d satCount=%.3g\n",
-                 phsDiffThreshold, sysEnum, typeEnum, satelliteCountThreshold);
+                 m_InstanceId, phsDiffThreshold, sysEnum, typeEnum, satelliteCountThreshold);
         return;
     }
     if (!std::isfinite(satelliteCountThreshold) || satelliteCountThreshold < 0.0 ||
         satelliteCountThreshold > (double)GN902_MAX_PORT_SAT)
     {
-        GN902Log("SetThresholdDetection: INVALID satCount=%.3g (out of [0,%d]), ignored. "
+        GN902Log("[ID=%d] SetThresholdDetection: INVALID satCount=%.3g (out of [0,%d]), ignored. "
                  "sys=%d type=%d phsDiff=%.3g\n",
-                 satelliteCountThreshold, GN902_MAX_PORT_SAT, sysEnum, typeEnum, phsDiffThreshold);
+                 m_InstanceId, satelliteCountThreshold, GN902_MAX_PORT_SAT, sysEnum, typeEnum, phsDiffThreshold);
         return;
     }
 
@@ -2740,8 +2736,8 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     // 注意: 连续切刀数 cutCountThreshold 不由本接口传入, 见 GN902::SetCutnumThreshold。
     // ★ 末尾补 '\n': 原来用空格结尾, 多条日志会粘在同一行, 看起来像一条超长日志。
     // ★ 用 %.3g 代替 %.3f: 配合上面的校验, 正常值打印不受影响; 即使异常大也不会打印几百位数字。
-    GN902Log("SetThresholdDetection: sys=%d type=%d phsDiff=%.3g satCount=%.3g\n",
-             sysEnum, typeEnum, phsDiffThreshold, satelliteCountThreshold);
+    GN902Log("[ID=%d] SetThresholdDetection: sys=%d type=%d phsDiff=%.3g satCount=%.3g\n",
+             m_InstanceId, sysEnum, typeEnum, phsDiffThreshold, satelliteCountThreshold);
     return;
 }
 
@@ -2759,8 +2755,7 @@ void GN902::SetCutnumThreshold(int thresholdCount){
         it->second->eng->setDetectionRecordNum(thresholdCount);
     }
     // ★ 末尾补 '\n', 避免与下一条日志粘行
-    // ★ 末尾补 '\n', 避免与下一条日志粘行
-    GN902Log("SetCutnumThreshold: cutCountThreshold=%d\n", thresholdCount);
+    GN902Log("[ID=%d] SetCutnumThreshold: cutCountThreshold=%d\n", m_InstanceId , thresholdCount);
 }
 // 设置数据
 // @param data 数据指针
@@ -2807,8 +2802,8 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
         buf.erase(buf.begin());
     }
 
-    GN902Log("SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d\n",
-             cutIdx_1, cutIdx_2, cut, data->i_PortOneNum, data->i_PortTwoNum, (int)buf.size());
+    GN902Log("[ID=%d] SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d\n",
+             m_InstanceId, cutIdx_1, cutIdx_2, cut, data->i_PortOneNum, data->i_PortTwoNum, (int)buf.size());
 }
 
 // 获取结果
@@ -2818,18 +2813,18 @@ void GN902::GetResult(SpoofingResult& result){
     {
         result.i_Count = 0;
         // ★ 实例不存在(未创建/已释放)也要留痕, 便于排查调用时序问题
-        GN902Log("===== GetResult_GN902 called: instance NOT FOUND, return empty =====\n");
+        GN902Log("[ID=%d] ====== GetResult_GN902 called: instance NOT FOUND, return empty =====\n", m_InstanceId);
         return;
     }
     // 取最近一轮(喂入引擎后)的测向结果
     result = it->second->result;
 
     // ★ 每调用一次 GetResult_GN902 打印一次标识
-    GN902Log("===== GetResult_GN902 called: alarmCount=%d =====\n", result.i_Count);
+    GN902Log("[ID=%d] ====== GetResult_GN902 called: alarmCount=%d =====\n", m_InstanceId, result.i_Count);
     for (int i = 0; i < result.i_Count; ++i)
     {
-        GN902Log("      [%d] Sys=%d Type=%d Count=%d Angle=%.2f\n",
-                 i,
+        GN902Log("[ID=%d] Sys=%d Type=%d Count=%d Angle=%.2f\n",
+                 m_InstanceId,
                  result.i_SatelliteAngle[i].i_Sys,
                  result.i_SatelliteAngle[i].i_Type,
                  result.i_SatelliteAngle[i].i_Count,
@@ -2891,7 +2886,7 @@ void GN902::Detect()
     st->eng->configCyclicRuntime(true, FRAMES_PER_CUT, true, 0.0);
     st->eng->setGNSSData(batch.data(), (int)batch.size());
 
-    GN902Log("Detect: batchSize=%d (7 cuts * %d frames)\n", (int)batch.size(), FRAMES_PER_CUT);
+    GN902Log("[ID=%d] Detect: batchSize=%d (7 cuts * %d frames)\n", m_InstanceId, (int)batch.size(), FRAMES_PER_CUT);
 }
 
 // 测向
@@ -2909,8 +2904,8 @@ void GN902::Doa(){
     GN902Log("Doa: 报警频点数=%d\n", st->result.i_Count);
     for (int i = 0; i < st->result.i_Count; ++i)
     {
-        GN902Log("  ID=%d Sys=%d Type=%d Count=%d Angle=%.2f Alarm=%d\n",
-                 
+        GN902Log("[ID=%d]  ID=%d Sys=%d Type=%d Count=%d Angle=%.2f Alarm=%d\n",
+                 m_InstanceId,
                  st->result.i_SatelliteAngle[i].i_Sys,
                  st->result.i_SatelliteAngle[i].i_Type,
                  st->result.i_SatelliteAngle[i].i_Count,

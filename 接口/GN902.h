@@ -756,7 +756,21 @@ public:
      */
     void GetAlarmMoments(std::vector<AlarmMoment>& out);
 
+        /**
+     * @brief 设置实例在 GN902Container 中的 id（由 Create_GN902 调用, 用于日志标识）
+     * @param id 容器索引（>=0）
+     */
+    void SetInstanceId(int id);
+
+    /**
+     * @brief 获取实例 id（未分配时为 -1）
+     */
+    int GetInstanceId() const { return m_InstanceId; }
+
 private:
+    /// 实例在 GN902Container 中的索引(用于日志标识); -1=尚未分配
+    int m_InstanceId = -1;
+
     void Detect();  ///< 整轮组批并喂入引擎, 完成循环切刀欺骗检测与跟踪
     void Doa();     ///< 从引擎取出本轮测向结果
 };
