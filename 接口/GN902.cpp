@@ -2493,11 +2493,11 @@ std::vector<GN902 *> GN902Container;
 //       "输出稀疏/完全无输出"。改天线对约定时这里必须同步。
 static int mapPairToCutIndex(int cutIdx_1, int cutIdx_2)
 {
-    if (cutIdx_1 == 7 && cutIdx_2 == 7)
+    if ((cutIdx_1 == 7 && cutIdx_2 == 7) || (cutIdx_1 == 1 && cutIdx_2 == 1))
     {
         return 0; // 校正刀
     }
-    if (cutIdx_1 == 1 && cutIdx_2 >= 1 && cutIdx_2 <= 7)
+    if (cutIdx_1 == 1 && cutIdx_2 >= 2 && cutIdx_2 <= 7)
     {
         return cutIdx_2 - 1; // {1,1}=旧约定校正刀(0), {1,2}..{1,7}=六测向刀(1..6)
     }
@@ -2909,7 +2909,8 @@ void GN902::Doa(){
     GN902Log("Doa: 报警频点数=%d\n", st->result.i_Count);
     for (int i = 0; i < st->result.i_Count; ++i)
     {
-        GN902Log("  Sys=%d Type=%d Count=%d Angle=%.2f Alarm=%d\n",
+        GN902Log("  ID=%d Sys=%d Type=%d Count=%d Angle=%.2f Alarm=%d\n",
+                 
                  st->result.i_SatelliteAngle[i].i_Sys,
                  st->result.i_SatelliteAngle[i].i_Type,
                  st->result.i_SatelliteAngle[i].i_Count,
