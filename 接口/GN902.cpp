@@ -2549,6 +2549,91 @@ static void collectFixedPairPhaseDiff(GN902State *st, const GNSSData *data, int 
 // 由 gn902_config.txt 的 save_data_enable / save_data_path 控制, 默认关闭。
 // 文本、追加模式; 首次写入时打印一段文件头。
 // =============================================================================
+
+// =============================================================================
+// 数据清洗
+// -----------------------------------------------------------------------------
+// 目的: 上位机传入的原始数据可能含异常值(未初始化/溢出/单位错误), 直接进入
+//       算法会污染相位差、伪距、载噪比, 导致检测/测向结果异常甚至崩溃。
+// 清洗规则:
+//   1) 载噪比 i_Snr: 非有限值或超出 [0, GN902_SNR_MAX_DB] 时截断/置零
+//   2) 伪距   i_Psr: 非有限值或 |i_Psr| > 1e10 时置零
+//   3) 载波相位 i_Phase: 非有限值或 |i_Phase| > 1e11 时置零
+//   4) 多普勒 i_Dop: 非有限值时置零(附加保护)
+//   5) 卫星系统/频点/PRN: 非法系统置为 -1 由引擎过滤(此处仅做有限性保护)
+// 清洗后的数据会覆盖传入的副本, 后续保存/采集/引擎均使用清洗后的值。
+// =============================================================================
+static const float  GN902_SNR_MAX_DB   = 60.0f;   // 载噪比上限(dB-Hz)
+static const double GN902_PSR_MAX_ABS  = 1e10;     // 伪距绝对值上限(米)
+static const double GN902_PHASE_MAX_ABS= 1e11;     // 载波相位绝对值上限(周)
+
+// 清洗单颗卫星数据; 返回是否发生了修改
+static bool sanitizeSatelliteData(SatelliteData &s)
+{
+    bool changed = false;
+
+    // 载噪比: 非有限 -> 0; 超上限 -> 截断; 负值 -> 0
+    if (!std::isfinite(s.i_Snr))
+    {
+        s.i_Snr = 0.0f;
+        changed = true;
+    }
+    else if (s.i_Snr < 0.0f)
+    {
+        s.i_Snr = 0.0f;
+        changed = true;
+    }
+    else if (s.i_Snr > GN902_SNR_MAX_DB)
+    {
+        s.i_Snr = GN902_SNR_MAX_DB;
+        changed = true;
+    }
+
+    // 伪距: 非有限 或 |psr| > 1e10 -> 0
+    if (!std::isfinite(s.i_Psr) || std::fabs(s.i_Psr) > GN902_PSR_MAX_ABS)
+    {
+        s.i_Psr = 0.0;
+        changed = true;
+    }
+
+    // 载波相位: 非有限 或 |phase| > 1e11 -> 0
+    if (!std::isfinite(s.i_Phase) || std::fabs(s.i_Phase) > GN902_PHASE_MAX_ABS)
+    {
+        s.i_Phase = 0.0;
+        changed = true;
+    }
+
+    // 多普勒: 非有限 -> 0 (附加保护)
+    if (!std::isfinite(s.i_Dop))
+    {
+        s.i_Dop = 0.0;
+        changed = true;
+    }
+
+    return changed;
+}
+
+// 清洗一帧 GNSSData; 返回被修改的卫星条数(端口1+端口2)
+static int sanitizeGNSSData(GNSSData &d)
+{
+    int changedCount = 0;
+
+    int n1 = d.i_PortOneNum;
+    int n2 = d.i_PortTwoNum;
+    if (n1 < 0 || n1 > GN902_MAX_PORT_SAT) { n1 = (n1 < 0) ? 0 : GN902_MAX_PORT_SAT; d.i_PortOneNum = n1; }
+    if (n2 < 0 || n2 > GN902_MAX_PORT_SAT) { n2 = (n2 < 0) ? 0 : GN902_MAX_PORT_SAT; d.i_PortTwoNum = n2; }
+
+    for (int i = 0; i < n1; ++i)
+    {
+        if (sanitizeSatelliteData(d.i_PortOne[i])) ++changedCount;
+    }
+    for (int i = 0; i < n2; ++i)
+    {
+        if (sanitizeSatelliteData(d.i_PortTwo[i])) ++changedCount;
+    }
+    return changedCount;
+}
+
 static void saveInputGnssData(GN902State *st, const GNSSData *data, int cutIdx_1, int cutIdx_2)
 {
     if (st == 0 || data == 0 || !g_gn902Cfg.saveDataEnable)
@@ -2757,6 +2842,7 @@ void GN902::SetCutnumThreshold(int thresholdCount){
     // ★ 末尾补 '\n', 避免与下一条日志粘行
     GN902Log("[ID=%d] SetCutnumThreshold: cutCountThreshold=%d\n", m_InstanceId , thresholdCount);
 }
+
 // 设置数据
 // @param data 数据指针
 // @param cutIdx_1 通道1天线索引(参考天线，固定为1)
@@ -2768,13 +2854,24 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
     GN902State *st = it->second;
     if (data == 0) return;
 
+    // ★ 数据清洗: 拷贝一份, 对载噪比/伪距/相位等做上下限与有限性保护,
+    //   后续保存/采集/引擎全部使用清洗后的数据。
+    GNSSData cleaned = *data;
+    int changedCount = sanitizeGNSSData(cleaned);
+    if (changedCount > 0)
+    {
+        GN902Log("[ID=%d] SetData: sanitized %d satellite entries (pair=(%d,%d))\n",
+                 m_InstanceId, changedCount, cutIdx_1, cutIdx_2);
+    }
+
     // 保存上位机传入的原始帧（由 gn902_config.txt 控制，默认关闭）
-    saveInputGnssData(st, data, cutIdx_1, cutIdx_2);
+    // 注意: 此处保存的是清洗后的数据, 与"实际喂进算法"一致。
+    saveInputGnssData(st, &cleaned, cutIdx_1, cutIdx_2);
 
     // 固定基线采集 {8,9}/{9,8}
     if ((cutIdx_1 == 8 && cutIdx_2 == 9) || (cutIdx_1 == 9 && cutIdx_2 == 8))
     {
-        collectFixedPairPhaseDiff(st, data, cutIdx_1, cutIdx_2);
+        collectFixedPairPhaseDiff(st, &cleaned, cutIdx_1, cutIdx_2);
         return;
     }
 
@@ -2796,14 +2893,14 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
 
     // 将当前帧加入当前刀的缓冲区
     std::vector<GNSSData>& buf = st->currentCutBuf[cut];
-    buf.push_back(*data);
+    buf.push_back(cleaned);
     if (buf.size() > 8)          // 每刀最多保留最近 8 帧
     {
         buf.erase(buf.begin());
     }
 
     GN902Log("[ID=%d] SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d\n",
-             m_InstanceId, cutIdx_1, cutIdx_2, cut, data->i_PortOneNum, data->i_PortTwoNum, (int)buf.size());
+             m_InstanceId, cutIdx_1, cutIdx_2, cut, cleaned.i_PortOneNum, cleaned.i_PortTwoNum, (int)buf.size());
 }
 
 // 获取结果
