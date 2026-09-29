@@ -16,7 +16,8 @@
 // 新增: GN902 独立日志(与 PublicSpace::Log 分离)。
 //   - 由外部 .txt 配置文件控制开关;
 //   - 未读到配置文件 -> 默认不打印独立日志;
-//   - 日志文件路径也写在配置文件里(可自定义命名)。
+//   - 日志文件路径也写在配置文件里(可自定义命名);
+//   - ★ 每个实例 id 单独一份日志文件(路径模板含 %d 占位, 或自动追加 _id)。
 //
 // 新增: cutCountThreshold (连续切刀数, 对应引擎 m_Detection_Recodds_Num)
 //   - 改为通过接口 SetCutnumThreshold_GN902 传入(GN902::SetCutnumThreshold);
@@ -2211,6 +2212,10 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<
 //   - 与 PublicSpace::Log 完全分离，使用独立的文件句柄与独立命名；
 //   - 由外部 .txt 配置文件控制开关；未读到配置文件则默认不打印；
 //   - 日志文件路径由配置文件 log_path 指定，可自定义命名；
+//   - ★ 每个实例 id 单独一份日志文件 / 一份原始输入数据文件：
+//         * log_path / save_data_path 可写成含 "%d" 的模板(如 ./logs/gn902_doa_%d.log)，
+//           %d 会被替换成实例 id；
+//         * 若路径中没有 %d, 则在扩展名前自动追加 "_id"。
 //   - 注意: 连续切刀数 cutCountThreshold(对应引擎 m_Detection_Recodds_Num)已改为
 //     通过接口 SetCutnumThreshold_GN902 传入, 不再由本配置文件读取。
 //
@@ -2223,35 +2228,42 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<
 // 配置文件内容(以 '#' 或 ';' 作为注释起始)：
 //     # 是否启用独立日志，1=开启，0=关闭(默认关闭)
 //     log_enable=1
-//     # 独立日志文件路径(相对/绝对路径, 需带文件名)
-//     log_path=./logs/gn902_doa.log
+//     # 独立日志文件路径(相对/绝对路径, 需带文件名; 可用 %d 表示实例 id)
+//     log_path=./logs/gn902_doa_%d.log
 //     # 是否保存上位机传入算法的原始数据，1=开启，0=关闭(默认关闭)
 //     save_data_enable=1
-//     # 原始输入数据文件路径(相对/绝对路径, 需带文件名)
-//     save_data_path=./gn902_input.log
+//     # 原始输入数据文件路径(相对/绝对路径, 需带文件名; 可用 %d 表示实例 id)
+//     save_data_path=./logs/gn902_input_%d.log
 // =============================================================================
 namespace {
 
 struct GN902RuntimeConfig
 {
-    bool        logEnable;          // 独立日志开关 (默认 false)
-    std::string logPath;            // 独立日志文件路径(含文件名)
-    std::string cfgPath;            // 实际加载到的配置文件路径 (""=未找到)
-    bool        saveDataEnable;     // 原始输入数据保存开关 (默认 false)
-    std::string saveDataPath;       // 原始输入数据文件路径(含文件名)
+    bool        logEnable;            // 独立日志开关 (默认 false)
+    std::string logPathTemplate;      // 独立日志文件路径模板(可含 %d 作为 id 占位)
+    std::string cfgPath;              // 实际加载到的配置文件路径 (""=未找到)
+    bool        saveDataEnable;       // 原始输入数据保存开关 (默认 false)
+    std::string saveDataPathTemplate; // 原始输入数据文件路径模板(可含 %d)
 
     GN902RuntimeConfig()
         : logEnable(false),
-          logPath("./gn902_debug.log"),
+          logPathTemplate("./gn902_debug_%d.log"),
           cfgPath(""),
           saveDataEnable(false),
-          saveDataPath("./gn902_input.log") {}
+          saveDataPathTemplate("./gn902_input_%d.log") {}
 };
 
 GN902RuntimeConfig g_gn902Cfg;
 bool              g_gn902CfgLoaded = false;
-FILE             *g_gn902LogFp     = 0;
-std::mutex        g_gn902LogMutex;
+
+// ★ 每个实例 id 一份日志文件句柄
+std::map<int, FILE *> g_gn902LogFpMap;
+std::mutex            g_gn902LogMutex;
+
+// ★ 每个实例 id 一份原始输入数据文件句柄与计数
+std::map<int, FILE *>    g_gn902InputFpMap;
+std::map<int, long long> g_gn902InputCountMap;
+std::mutex               g_gn902InputMutex;
 
 // 去除首尾空白
 std::string gn902Trim(const std::string &s)
@@ -2270,6 +2282,28 @@ std::string gn902Lower(std::string s)
         s[i] = (char)std::tolower((unsigned char)s[i]);
     }
     return s;
+}
+
+// ★ 把路径模板里的 %d 替换为 id；若模板没有 %d, 则在扩展名前插入 _id
+std::string gn902MakePerIdPath(const std::string &tmpl, int id)
+{
+    std::string s = tmpl;
+    std::string idStr = std::to_string(id);
+
+    size_t pos = s.find("%d");
+    if (pos != std::string::npos)
+    {
+        s.replace(pos, 2, idStr);
+        return s;
+    }
+
+    // 没有 %d: 在最后一个 '.' 之前插入 _id
+    size_t dot = s.find_last_of('.');
+    if (dot == std::string::npos)
+    {
+        return s + "_" + idStr;
+    }
+    return s.substr(0, dot) + "_" + idStr + s.substr(dot);
 }
 
 // 解析一个 .txt 配置文件, 成功打开并读取返回 true (即使文件为空也算成功)
@@ -2317,7 +2351,7 @@ bool gn902ParseConfigFile(const std::string &path, GN902RuntimeConfig &cfg)
             {
                 if (!val.empty())
                 {
-                    cfg.logPath = val;
+                    cfg.logPathTemplate = val;   // ★ 模板
                 }
             }
             // 是否保存上位机传入算法的原始数据
@@ -2334,7 +2368,7 @@ bool gn902ParseConfigFile(const std::string &path, GN902RuntimeConfig &cfg)
             {
                 if (!val.empty())
                 {
-                    cfg.saveDataPath = val;
+                    cfg.saveDataPathTemplate = val;   // ★ 模板
                 }
             }
         }
@@ -2358,10 +2392,10 @@ void gn902LoadConfig()
 
     // 默认值: 不打印独立日志, 不保存原始输入数据
     g_gn902Cfg.logEnable = false;
-    g_gn902Cfg.logPath   = "./gn902_debug.log";
+    g_gn902Cfg.logPathTemplate   = "./gn902_debug_%d.log";
     g_gn902Cfg.cfgPath   = "";
     g_gn902Cfg.saveDataEnable = false;
-    g_gn902Cfg.saveDataPath   = "./gn902_input.log";
+    g_gn902Cfg.saveDataPathTemplate   = "./gn902_input_%d.log";
 
     // 1) 环境变量优先
     const char *envCfg = std::getenv("GN902_CONFIG");
@@ -2392,11 +2426,12 @@ void gn902LoadConfig()
     // 一个都没读到: 保持默认(不打印), cfgPath 保持空
 }
 
-// 独立命名日志：与 PublicSpace::Log 完全分离
+// ★ 独立命名日志：与 PublicSpace::Log 完全分离；每个实例 id 一份文件
+//    第一个参数为实例 id, 用于选择对应的日志文件句柄。
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((format(printf, 1, 2)))
+__attribute__((format(printf, 2, 3)))
 #endif
-void GN902Log(const char *fmt, ...)
+void GN902Log(int id, const char *fmt, ...)
 {
     if (!g_gn902Cfg.logEnable)
     {
@@ -2404,13 +2439,14 @@ void GN902Log(const char *fmt, ...)
     }
     std::lock_guard<std::mutex> lk(g_gn902LogMutex);
 
-    if (g_gn902LogFp == 0)
+    FILE *&fp = g_gn902LogFpMap[id];
+    if (fp == 0)
     {
-        g_gn902LogFp = fopen(g_gn902Cfg.logPath.c_str(), "a");
-        if (g_gn902LogFp == 0)
+        std::string path = gn902MakePerIdPath(g_gn902Cfg.logPathTemplate, id);
+        fp = fopen(path.c_str(), "a");
+        if (fp == 0)
         {
-            std::cerr << "[GN902] 无法打开独立日志文件: "
-                      << g_gn902Cfg.logPath << std::endl;
+            std::cerr << "[GN902] 无法打开独立日志文件: " << path << std::endl;
             return;
         }
     }
@@ -2423,14 +2459,14 @@ void GN902Log(const char *fmt, ...)
     {
         std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", lt);
     }
-    fprintf(g_gn902LogFp, "[%s] ", ts);
+    fprintf(fp, "[%s] ", ts);
 
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(g_gn902LogFp, fmt, ap);
+    vfprintf(fp, fmt, ap);
     va_end(ap);
 
-    fflush(g_gn902LogFp);
+    fflush(fp);
 }
 
 } // namespace
@@ -2447,10 +2483,8 @@ struct GN902State
     int lastCut;                              // 上一次处理的 cut 索引，用于检测刀变化
     SpoofingResult result;                    // 最近一轮测向结果
     FILE *phaseDiffFp;                        // 固定基线相位差采集日志
-    FILE *inputDataFp;                        // 原始输入数据保存文件
-    long long inputDataCount;                 // 已保存的输入帧数
 
-    GN902State() : eng(0), lastCut(-1), phaseDiffFp(0), inputDataFp(0), inputDataCount(0)
+    GN902State() : eng(0), lastCut(-1), phaseDiffFp(0)
     {
         clearResult();
     }
@@ -2459,7 +2493,6 @@ struct GN902State
     {
         if (eng) { delete eng; eng = 0; }
         if (phaseDiffFp) { fclose(phaseDiffFp); phaseDiffFp = 0; }
-        if (inputDataFp) { fclose(inputDataFp); inputDataFp = 0; }
     }
 
     void clearResult()
@@ -2547,6 +2580,7 @@ static void collectFixedPairPhaseDiff(GN902State *st, const GNSSData *data, int 
 // 与 SpoofingDoa::saveGNSSData(PublicSpace::saveArrayToBinary, 二进制、按轮组批后)
 // 是两回事: 本函数在接口入口处记录, 因此也包含被引擎忽略的非标准天线对帧。
 // 由 gn902_config.txt 的 save_data_enable / save_data_path 控制, 默认关闭。
+// ★ 每个实例 id 一份文件(路径模板 %d 或自动追加 _id)。
 // 文本、追加模式; 首次写入时打印一段文件头。
 // =============================================================================
 
@@ -2634,7 +2668,8 @@ static int sanitizeGNSSData(GNSSData &d)
     return changedCount;
 }
 
-static void saveInputGnssData(GN902State *st, const GNSSData *data, int cutIdx_1, int cutIdx_2)
+static void saveInputGnssData(GN902State *st, int id,
+                              const GNSSData *data, int cutIdx_1, int cutIdx_2)
 {
     if (st == 0 || data == 0 || !g_gn902Cfg.saveDataEnable)
     {
@@ -2649,26 +2684,29 @@ static void saveInputGnssData(GN902State *st, const GNSSData *data, int cutIdx_1
         std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", lt);
     }
 
-    if (st->inputDataFp == 0)
+    std::lock_guard<std::mutex> lk(g_gn902InputMutex);
+
+    FILE *&fp = g_gn902InputFpMap[id];
+    if (fp == 0)
     {
-        st->inputDataFp = fopen(g_gn902Cfg.saveDataPath.c_str(), "a");
-        if (st->inputDataFp == 0)
+        std::string path = gn902MakePerIdPath(g_gn902Cfg.saveDataPathTemplate, id);
+        fp = fopen(path.c_str(), "a");
+        if (fp == 0)
         {
-            std::cerr << "[GN902] 无法打开原始输入数据文件: "
-                      << g_gn902Cfg.saveDataPath << std::endl;
+            std::cerr << "[GN902] 无法打开原始输入数据文件: " << path << std::endl;
             return;
         }
-        fprintf(st->inputDataFp,
+        fprintf(fp,
                 "=== GN902 原始输入数据(SetData_GN902 入口逐帧记录) ===\n"
+                "    实例ID=%d\n"
                 "    起始时间=%s sizeof(SatelliteData)=%d sizeof(GNSSData)=%d\n"
                 "    帧行: [帧序号] 时间 天线对=(通道1,通道2) 切刀序号 帧类型 双端口卫星数\n"
                 "    星行: 端口Prn Sys Type Snr Psr Phase Dop SpoofFlag\n"
                 "========================================================\n",
-                ts, (int)sizeof(SatelliteData), (int)sizeof(GNSSData));
+                id, ts, (int)sizeof(SatelliteData), (int)sizeof(GNSSData));
     }
 
-    FILE *fp = st->inputDataFp;
-    long long idx = ++st->inputDataCount;
+    long long idx = ++g_gn902InputCountMap[id];
 
     // 切刀序号(0=校正刀, 1..6=六测向刀, -1=非标准天线对 => 引擎忽略该帧)
     int cut = mapPairToCutIndex(cutIdx_1, cutIdx_2);
@@ -2713,11 +2751,12 @@ static void saveInputGnssData(GN902State *st, const GNSSData *data, int cutIdx_1
 void GN902::SetInstanceId(int id)
 {
     m_InstanceId = id;
-    GN902Log("[ID=%d] === GN902 实例创建: cfg=%s logEnable=%d logPath=%s ===\n",
+    GN902Log(m_InstanceId,
+             "[ID=%d] === GN902 实例创建: cfg=%s logEnable=%d logPath=%s ===\n",
              m_InstanceId,
              g_gn902Cfg.cfgPath.empty() ? "(未找到)" : g_gn902Cfg.cfgPath.c_str(),
              (int)g_gn902Cfg.logEnable,
-             g_gn902Cfg.logPath.c_str());
+             g_gn902Cfg.logPathTemplate.c_str());
 }
 
 GN902::GN902(){
@@ -2741,7 +2780,7 @@ GN902::GN902(){
     {
         std::cout << "[GN902] 已加载配置: " << g_gn902Cfg.cfgPath
                   << " | 独立日志=" << (g_gn902Cfg.logEnable ? "开启" : "关闭")
-                  << " | 路径=" << g_gn902Cfg.logPath
+                  << " | 路径模板=" << g_gn902Cfg.logPathTemplate
                   << std::endl;
     }
     // ★ 原 "=== GN902 实例创建 ..." 已迁移到 SetInstanceId（此时 m_InstanceId 才有值）
@@ -2754,12 +2793,34 @@ GN902::~GN902(){
         delete it->second; // 内部释放引擎
         g_gn902State.erase(it);
     }
+
+    // ★ 关闭本 id 的独立日志句柄与原始输入数据句柄
+    if (m_InstanceId >= 0)
+    {
+        {
+            std::lock_guard<std::mutex> lk(g_gn902LogMutex);
+            std::map<int, FILE *>::iterator lf = g_gn902LogFpMap.find(m_InstanceId);
+            if (lf != g_gn902LogFpMap.end())
+            {
+                if (lf->second) fclose(lf->second);
+                g_gn902LogFpMap.erase(lf);
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_gn902InputMutex);
+            std::map<int, FILE *>::iterator inf = g_gn902InputFpMap.find(m_InstanceId);
+            if (inf != g_gn902InputFpMap.end())
+            {
+                if (inf->second) fclose(inf->second);
+                g_gn902InputFpMap.erase(inf);
+            }
+            g_gn902InputCountMap.erase(m_InstanceId);
+        }
+    }
 }
 
 
 // 设置阈值检测参数
-// @param phsDiffThreshold 位相差阈值(度, 有效范围 0~360)
-// @param satelliteCountThreshold 卫星数阈值(有效范围 0~GN902_MAX_PORT_SAT)
 // @param phsDiffThreshold 位相差阈值(度, 有效范围 0~360)
 // @param satelliteCountThreshold 卫星数阈值(有效范围 0~GN902_MAX_PORT_SAT)
 // @param sysEnum 系统类型
@@ -2778,7 +2839,8 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     //   合法范围: 相位差阈值 0~360 度, 卫星数阈值 0~GN902_MAX_PORT_SAT。
     if (!std::isfinite(phsDiffThreshold) || phsDiffThreshold < 0.0 || phsDiffThreshold > 360.0)
     {
-        GN902Log("[ID=%d] SetThresholdDetection: INVALID phsDiff=%.3g (out of [0,360]), ignored. "
+        GN902Log(m_InstanceId,
+                 "[ID=%d] SetThresholdDetection: INVALID phsDiff=%.3g (out of [0,360]), ignored. "
                  "sys=%d type=%d satCount=%.3g\n",
                  m_InstanceId, phsDiffThreshold, sysEnum, typeEnum, satelliteCountThreshold);
         return;
@@ -2786,29 +2848,8 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     if (!std::isfinite(satelliteCountThreshold) || satelliteCountThreshold < 0.0 ||
         satelliteCountThreshold > (double)GN902_MAX_PORT_SAT)
     {
-        GN902Log("[ID=%d] SetThresholdDetection: INVALID satCount=%.3g (out of [0,%d]), ignored. "
-                 "sys=%d type=%d phsDiff=%.3g\n",
-                 m_InstanceId, satelliteCountThreshold, GN902_MAX_PORT_SAT, sysEnum, typeEnum, phsDiffThreshold);
-        return;
-    }
-
-
-    // ★ 参数合法性校验
-    //   目的: 过滤调用方传入的无效值(未初始化变量 / 参数顺序写反 / 头文件与库 ABI
-    //         不一致导致 double 位模式被误解释)。这些垃圾值一旦进入引擎就会污染
-    //         阈值, 并让日志打印出 "203747...49216.000" 这样的超长数字。
-    //   合法范围: 相位差阈值 0~360 度, 卫星数阈值 0~GN902_MAX_PORT_SAT。
-    if (!std::isfinite(phsDiffThreshold) || phsDiffThreshold < 0.0 || phsDiffThreshold > 360.0)
-    {
-        GN902Log("[ID=%d] SetThresholdDetection: INVALID phsDiff=%.3g (out of [0,360]), ignored. "
-                 "sys=%d type=%d satCount=%.3g\n",
-                 m_InstanceId, phsDiffThreshold, sysEnum, typeEnum, satelliteCountThreshold);
-        return;
-    }
-    if (!std::isfinite(satelliteCountThreshold) || satelliteCountThreshold < 0.0 ||
-        satelliteCountThreshold > (double)GN902_MAX_PORT_SAT)
-    {
-        GN902Log("[ID=%d] SetThresholdDetection: INVALID satCount=%.3g (out of [0,%d]), ignored. "
+        GN902Log(m_InstanceId,
+                 "[ID=%d] SetThresholdDetection: INVALID satCount=%.3g (out of [0,%d]), ignored. "
                  "sys=%d type=%d phsDiff=%.3g\n",
                  m_InstanceId, satelliteCountThreshold, GN902_MAX_PORT_SAT, sysEnum, typeEnum, phsDiffThreshold);
         return;
@@ -2821,7 +2862,8 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     // 注意: 连续切刀数 cutCountThreshold 不由本接口传入, 见 GN902::SetCutnumThreshold。
     // ★ 末尾补 '\n': 原来用空格结尾, 多条日志会粘在同一行, 看起来像一条超长日志。
     // ★ 用 %.3g 代替 %.3f: 配合上面的校验, 正常值打印不受影响; 即使异常大也不会打印几百位数字。
-    GN902Log("[ID=%d] SetThresholdDetection: sys=%d type=%d phsDiff=%.3g satCount=%.3g\n",
+    GN902Log(m_InstanceId,
+             "[ID=%d] SetThresholdDetection: sys=%d type=%d phsDiff=%.3g satCount=%.3g\n",
              m_InstanceId, sysEnum, typeEnum, phsDiffThreshold, satelliteCountThreshold);
     return;
 }
@@ -2840,7 +2882,8 @@ void GN902::SetCutnumThreshold(int thresholdCount){
         it->second->eng->setDetectionRecordNum(thresholdCount);
     }
     // ★ 末尾补 '\n', 避免与下一条日志粘行
-    GN902Log("[ID=%d] SetCutnumThreshold: cutCountThreshold=%d\n", m_InstanceId , thresholdCount);
+    GN902Log(m_InstanceId, "[ID=%d] SetCutnumThreshold: cutCountThreshold=%d\n",
+             m_InstanceId, thresholdCount);
 }
 
 // 设置数据
@@ -2860,13 +2903,14 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
     int changedCount = sanitizeGNSSData(cleaned);
     if (changedCount > 0)
     {
-        GN902Log("[ID=%d] SetData: sanitized %d satellite entries (pair=(%d,%d))\n",
+        GN902Log(m_InstanceId,
+                 "[ID=%d] SetData: sanitized %d satellite entries (pair=(%d,%d))\n",
                  m_InstanceId, changedCount, cutIdx_1, cutIdx_2);
     }
 
     // 保存上位机传入的原始帧（由 gn902_config.txt 控制，默认关闭）
     // 注意: 此处保存的是清洗后的数据, 与"实际喂进算法"一致。
-    saveInputGnssData(st, &cleaned, cutIdx_1, cutIdx_2);
+    saveInputGnssData(st, m_InstanceId, &cleaned, cutIdx_1, cutIdx_2);
 
     // 固定基线采集 {8,9}/{9,8}
     if ((cutIdx_1 == 8 && cutIdx_2 == 9) || (cutIdx_1 == 9 && cutIdx_2 == 8))
@@ -2899,7 +2943,8 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
         buf.erase(buf.begin());
     }
 
-    GN902Log("[ID=%d] SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d\n",
+    GN902Log(m_InstanceId,
+             "[ID=%d] SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d\n",
              m_InstanceId, cutIdx_1, cutIdx_2, cut, cleaned.i_PortOneNum, cleaned.i_PortTwoNum, (int)buf.size());
 }
 
@@ -2910,17 +2955,22 @@ void GN902::GetResult(SpoofingResult& result){
     {
         result.i_Count = 0;
         // ★ 实例不存在(未创建/已释放)也要留痕, 便于排查调用时序问题
-        GN902Log("[ID=%d] ====== GetResult_GN902 called: instance NOT FOUND, return empty =====\n", m_InstanceId);
+        GN902Log(m_InstanceId,
+                 "[ID=%d] ====== GetResult_GN902 called: instance NOT FOUND, return empty =====\n",
+                 m_InstanceId);
         return;
     }
     // 取最近一轮(喂入引擎后)的测向结果
     result = it->second->result;
 
     // ★ 每调用一次 GetResult_GN902 打印一次标识
-    GN902Log("[ID=%d] ====== GetResult_GN902 called: alarmCount=%d =====\n", m_InstanceId, result.i_Count);
+    GN902Log(m_InstanceId,
+             "[ID=%d] ====== GetResult_GN902 called: alarmCount=%d =====\n",
+             m_InstanceId, result.i_Count);
     for (int i = 0; i < result.i_Count; ++i)
     {
-        GN902Log("[ID=%d] Sys=%d Type=%d Count=%d Angle=%.2f\n",
+        GN902Log(m_InstanceId,
+                 "[ID=%d] Sys=%d Type=%d Count=%d Angle=%.2f\n",
                  m_InstanceId,
                  result.i_SatelliteAngle[i].i_Sys,
                  result.i_SatelliteAngle[i].i_Type,
@@ -2983,7 +3033,9 @@ void GN902::Detect()
     st->eng->configCyclicRuntime(true, FRAMES_PER_CUT, true, 0.0);
     st->eng->setGNSSData(batch.data(), (int)batch.size());
 
-    GN902Log("[ID=%d] Detect: batchSize=%d (7 cuts * %d frames)\n", m_InstanceId, (int)batch.size(), FRAMES_PER_CUT);
+    GN902Log(m_InstanceId,
+             "[ID=%d] Detect: batchSize=%d (7 cuts * %d frames)\n",
+             m_InstanceId, (int)batch.size(), FRAMES_PER_CUT);
 }
 
 // 测向
@@ -2998,10 +3050,11 @@ void GN902::Doa(){
     st->eng->getAngleSpoofingDoa(st->result);
 
     // ★ 独立日志记录本轮测向结果
-    GN902Log("Doa: 报警频点数=%d\n", st->result.i_Count);
+    GN902Log(m_InstanceId, "[ID=%d] Doa: 报警频点数=%d\n", m_InstanceId, st->result.i_Count);
     for (int i = 0; i < st->result.i_Count; ++i)
     {
-        GN902Log("[ID=%d]  ID=%d Sys=%d Type=%d Count=%d Angle=%.2f Alarm=%d\n",
+        GN902Log(m_InstanceId,
+                 "[ID=%d] Sys=%d Type=%d Count=%d Angle=%.2f Alarm=%d\n",
                  m_InstanceId,
                  st->result.i_SatelliteAngle[i].i_Sys,
                  st->result.i_SatelliteAngle[i].i_Type,
