@@ -651,6 +651,9 @@ protected:
     /// 才将其卫星簇纳入跟踪, 用于滤除偶发跳变(对应 Python 的 ALARM_CONSECUTIVE_P)。
     int m_Detection_Recodds_Num = 1;
 
+    /// 是否跳过每刀第一帧再平滑：1=跳过（默认），0=不跳过。
+    int m_SkipFirstFrame = 1;
+
     /// 阵列阵元数量(7)。
     int m_AntennaNum = 7;
 

@@ -895,21 +895,29 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 
     vector<SatelliteDataPhaseDiffB> dataB;
     vector<vector<SatelliteDataPhaseDiffA>> oneCutData;
-    oneCutData.resize(m_OneCut_Frams);
     vector<vector<SatelliteDataPhaseDiffA>> resultData;
     SatelliteDataPhaseDiffA tpA;
+
+    // 计算本刀实际参与平滑的帧：默认跳过第一帧
+    int startFrame = 0;
+    int useFrames  = m_OneCut_Frams;
+    if (m_OneCut_Frams > 1 && m_SkipFirstFrame)
+    {
+        startFrame = 1;
+        useFrames  = m_OneCut_Frams - 1;
+    }
+
     for (int j = 0; j < cutNum; j++)
     {
         dataB.clear();
-        if ((int)oneCutData.size() != m_OneCut_Frams)
+        oneCutData.resize(useFrames);
+
+        for (int k = 0; k < useFrames; k++)
         {
-            oneCutData.resize(m_OneCut_Frams);
-        }
-        for (int k = 0; k < m_OneCut_Frams; k++)
-        {
-            int index = j * m_OneCut_Frams + k;
+            int index = j * m_OneCut_Frams + startFrame + k;
             oneCutData[k] = dataA[index];
         }
+
         int savedDeleteFlag = m_Delete_Prn_Flag;
         m_Delete_Prn_Flag = 0;
         getSatelliteDataPhaseDiffB(oneCutData, dataB);
@@ -924,6 +932,7 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
         }
         resultData.emplace_back(tpA2);
     }
+
     dataA.clear();
     vector<vector<SatelliteDataPhaseDiffA>>().swap(dataA);
     dataA = resultData;
