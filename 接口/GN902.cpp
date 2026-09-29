@@ -22,9 +22,16 @@
 //   - 改为通过接口 SetCutnumThreshold_GN902 传入(GN902::SetCutnumThreshold);
 //   - 取值 1..10; 不设置(<=0)时使用引擎默认值(2);
 //   - 不再从 txt 配置文件读取。
+//
+// 新增: 数据清洗(GN902::SetData 入口)
+//   - 载噪比 i_Snr 上限 60 dB-Hz;
+//   - 伪距 i_Psr 绝对值上限 1e10;
+//   - 相位 i_Phase 绝对值上限 1e11;
+//   - 不满足任一项的卫星从端口数组中压缩删除, 并打独立日志;
+//   - 只清洗副本, 不改调用方内存; 不改变任何跨边界结构体尺寸/偏移(ABI 不变)。
 // =============================================================================
 #include "GN902.h"
-#include <cctype>      // 新增: std::tolower
+#include <cctype>      // std::tolower
 
 using namespace std;
 
@@ -2201,7 +2208,7 @@ void SpoofingDoa::LogSatelliteDataPhaseDiffA(const SatelliteDataPhaseDiffA dataA
 void SpoofingDoa::LogSatelliteDataPhaseDiffType(const std::map<int, std::vector<SatelliteDataPhaseDiffA>> dataT)
 {
     std::vector<SatelliteDataPhaseDiffA> tp_dataA;
-    for (auto it = dataT.begin(); it != dataT.end(); it++)
+    for (auto it = dataT.begin(); it != dataT.end(); ++it)
     {
         tp_dataA.clear();
         tp_dataA = it->second;
@@ -2442,6 +2449,96 @@ void GN902Log(const char *fmt, ...)
     fflush(g_gn902LogFp);
 }
 
+// =============================================================================
+// ★ 数据清洗常量与函数 ★
+//   规则(三项全部满足才视为有效):
+//     1) 载噪比 i_Snr: 有限值, [0, GN902_SNR_MAX_DB] 之内;
+//     2) 伪距 i_Psr:   有限值, |i_Psr| <= GN902_PSR_MAX_ABS;
+//     3) 相位 i_Phase: 有限值, |i_Phase| <= GN902_PHASE_MAX_ABS。
+//   无效卫星从端口数组中压缩删除, 修正 i_PortXNum。
+//   注意: 只清洗副本(调用方内存不动), 且不改变任何跨边界结构体的字段/尺寸(ABI 不变)。
+// =============================================================================
+const float  GN902_SNR_MAX_DB    = 60.0f;    // 载噪比上限(dB-Hz)
+const double GN902_PSR_MAX_ABS   = 1.0e10;   // 伪距绝对值上限(米)
+const double GN902_PHASE_MAX_ABS = 1.0e11;   // 相位绝对值上限(周)
+
+// 判断单颗卫星是否有效; 无效时通过 reason 返回原因字符(S/P/R = Snr/Psr/Phase)
+bool gn902SatValid(const SatelliteData &s, char &reason)
+{
+    if (!std::isfinite((double)s.i_Snr) || s.i_Snr < 0.0f || s.i_Snr > GN902_SNR_MAX_DB)
+    {
+        reason = 'S';
+        return false;
+    }
+    if (!std::isfinite(s.i_Psr) || fabs(s.i_Psr) > GN902_PSR_MAX_ABS)
+    {
+        reason = 'P';
+        return false;
+    }
+    if (!std::isfinite(s.i_Phase) || fabs(s.i_Phase) > GN902_PHASE_MAX_ABS)
+    {
+        reason = 'R';
+        return false;
+    }
+    reason = 0;
+    return true;
+}
+
+// 清洗一帧: 逐端口压缩, 删除无效星, 修正计数, 并(可选)打独立日志
+void gn902CleanGnssData(GNSSData &d, int instId, int cutIdx_1, int cutIdx_2)
+{
+    // ---- 端口1 ----
+    {
+        int n = d.i_PortOneNum;
+        if (n < 0) n = 0;
+        if (n > GN902_MAX_PORT_SAT) n = GN902_MAX_PORT_SAT;
+        int w = 0;
+        for (int r = 0; r < n; ++r)
+        {
+            char reason = 0;
+            if (gn902SatValid(d.i_PortOne[r], reason))
+            {
+                if (w != r) d.i_PortOne[w] = d.i_PortOne[r];
+                ++w;
+            }
+            else
+            {
+                GN902Log("[ID=%d] CleanData(Port1): pair=(%d,%d) drop Prn=%d Sys=%d Type=%d "
+                         "reason=%c Snr=%.3g Psr=%.3g Phase=%.3g\n",
+                         instId, cutIdx_1, cutIdx_2,
+                         d.i_PortOne[r].i_Prn, d.i_PortOne[r].i_Sys, d.i_PortOne[r].i_Type,
+                         reason, d.i_PortOne[r].i_Snr, d.i_PortOne[r].i_Psr, d.i_PortOne[r].i_Phase);
+            }
+        }
+        d.i_PortOneNum = w;
+    }
+    // ---- 端口2 ----
+    {
+        int n = d.i_PortTwoNum;
+        if (n < 0) n = 0;
+        if (n > GN902_MAX_PORT_SAT) n = GN902_MAX_PORT_SAT;
+        int w = 0;
+        for (int r = 0; r < n; ++r)
+        {
+            char reason = 0;
+            if (gn902SatValid(d.i_PortTwo[r], reason))
+            {
+                if (w != r) d.i_PortTwo[w] = d.i_PortTwo[r];
+                ++w;
+            }
+            else
+            {
+                GN902Log("[ID=%d] CleanData(Port2): pair=(%d,%d) drop Prn=%d Sys=%d Type=%d "
+                         "reason=%c Snr=%.3g Psr=%.3g Phase=%.3g\n",
+                         instId, cutIdx_1, cutIdx_2,
+                         d.i_PortTwo[r].i_Prn, d.i_PortTwo[r].i_Sys, d.i_PortTwo[r].i_Type,
+                         reason, d.i_PortTwo[r].i_Snr, d.i_PortTwo[r].i_Psr, d.i_PortTwo[r].i_Phase);
+            }
+        }
+        d.i_PortTwoNum = w;
+    }
+}
+
 } // namespace
 
 // =============================================================================
@@ -2557,6 +2654,7 @@ static void collectFixedPairPhaseDiff(GN902State *st, const GNSSData *data, int 
 // 是两回事: 本函数在接口入口处记录, 因此也包含被引擎忽略的非标准天线对帧。
 // 由 gn902_config.txt 的 save_data_enable / save_data_path 控制, 默认关闭。
 // 文本、追加模式; 首次写入时打印一段文件头。
+// 注意: 本函数保存的是调用方传入的原始帧(未清洗), 数据清洗在 SetData 内进行。
 // =============================================================================
 static void saveInputGnssData(GN902State *st, const GNSSData *data, int cutIdx_1, int cutIdx_2)
 {
@@ -2684,8 +2782,6 @@ GN902::~GN902(){
 // 设置阈值检测参数
 // @param phsDiffThreshold 位相差阈值(度, 有效范围 0~360)
 // @param satelliteCountThreshold 卫星数阈值(有效范围 0~GN902_MAX_PORT_SAT)
-// @param phsDiffThreshold 位相差阈值(度, 有效范围 0~360)
-// @param satelliteCountThreshold 卫星数阈值(有效范围 0~GN902_MAX_PORT_SAT)
 // @param sysEnum 系统类型
 // @param typeEnum 类型
 void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCountThreshold, int sysEnum, int typeEnum){
@@ -2694,28 +2790,6 @@ void GN902::SetThresholdDetection(double phsDiffThreshold, double satelliteCount
     {
         return;
     }
-
-    // ★ 参数合法性校验
-    //   目的: 过滤调用方传入的无效值(未初始化变量 / 参数顺序写反 / 头文件与库 ABI
-    //         不一致导致 double 位模式被误解释)。这些垃圾值一旦进入引擎就会污染
-    //         阈值, 并让日志打印出 "203747...49216.000" 这样的超长数字。
-    //   合法范围: 相位差阈值 0~360 度, 卫星数阈值 0~GN902_MAX_PORT_SAT。
-    if (!std::isfinite(phsDiffThreshold) || phsDiffThreshold < 0.0 || phsDiffThreshold > 360.0)
-    {
-        GN902Log("[ID=%d] SetThresholdDetection: INVALID phsDiff=%.3g (out of [0,360]), ignored. "
-                 "sys=%d type=%d satCount=%.3g\n",
-                 m_InstanceId, phsDiffThreshold, sysEnum, typeEnum, satelliteCountThreshold);
-        return;
-    }
-    if (!std::isfinite(satelliteCountThreshold) || satelliteCountThreshold < 0.0 ||
-        satelliteCountThreshold > (double)GN902_MAX_PORT_SAT)
-    {
-        GN902Log("[ID=%d] SetThresholdDetection: INVALID satCount=%.3g (out of [0,%d]), ignored. "
-                 "sys=%d type=%d phsDiff=%.3g\n",
-                 m_InstanceId, satelliteCountThreshold, GN902_MAX_PORT_SAT, sysEnum, typeEnum, phsDiffThreshold);
-        return;
-    }
-
 
     // ★ 参数合法性校验
     //   目的: 过滤调用方传入的无效值(未初始化变量 / 参数顺序写反 / 头文件与库 ABI
@@ -2766,6 +2840,7 @@ void GN902::SetCutnumThreshold(int thresholdCount){
     // ★ 末尾补 '\n', 避免与下一条日志粘行
     GN902Log("[ID=%d] SetCutnumThreshold: cutCountThreshold=%d\n", m_InstanceId , thresholdCount);
 }
+
 // 设置数据
 // @param data 数据指针
 // @param cutIdx_1 通道1天线索引(参考天线，固定为1)
@@ -2780,10 +2855,15 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
     // 保存上位机传入的原始帧（由 gn902_config.txt 控制，默认关闭）
     saveInputGnssData(st, data, cutIdx_1, cutIdx_2);
 
-    // 固定基线采集 {8,9}/{9,8}
+    // ★ 数据清洗: 复制一份再清洗, 不动调用方内存。
+    //   清洗规则见文件头部说明与 gn902CleanGnssData()。
+    GNSSData clean = *data;
+    gn902CleanGnssData(clean, m_InstanceId, cutIdx_1, cutIdx_2);
+
+    // 固定基线采集 {8,9}/{9,8}（用清洗后的副本）
     if ((cutIdx_1 == 8 && cutIdx_2 == 9) || (cutIdx_1 == 9 && cutIdx_2 == 8))
     {
-        collectFixedPairPhaseDiff(st, data, cutIdx_1, cutIdx_2);
+        collectFixedPairPhaseDiff(st, &clean, cutIdx_1, cutIdx_2);
         return;
     }
 
@@ -2803,16 +2883,16 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
     }
     st->lastCut = cut;
 
-    // 将当前帧加入当前刀的缓冲区
+    // 将当前帧（清洗后）加入当前刀的缓冲区
     std::vector<GNSSData>& buf = st->currentCutBuf[cut];
-    buf.push_back(*data);
+    buf.push_back(clean);
     if (buf.size() > 8)          // 每刀最多保留最近 8 帧
     {
         buf.erase(buf.begin());
     }
 
     GN902Log("[ID=%d] SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d\n",
-             m_InstanceId, cutIdx_1, cutIdx_2, cut, data->i_PortOneNum, data->i_PortTwoNum, (int)buf.size());
+             m_InstanceId, cutIdx_1, cutIdx_2, cut, clean.i_PortOneNum, clean.i_PortTwoNum, (int)buf.size());
 }
 
 // 获取结果
