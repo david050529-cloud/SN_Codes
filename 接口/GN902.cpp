@@ -23,6 +23,12 @@
 //   - 改为通过接口 SetCutnumThreshold_GN902 传入(GN902::SetCutnumThreshold);
 //   - 取值 1..10; 不设置(<=0)时使用引擎默认值(2);
 //   - 不再从 txt 配置文件读取。
+//
+// ★ 切刀调度改造(本次):
+//   - 引擎仍按"1 校正刀 + 6 测向刀"一轮模板工作, m_cutSequence 不变;
+//   - "每 400 个测向刀才切 1 次校正刀"由接口层计数器 + 上位机调用节奏保证;
+//   - 测向只用"最近 6 个测向刀": 每刀型缓存最近一帧, 六刀齐备即测向;
+//   - 校正刀到达时立即刷新通道校正(updateCorrectionOnly), 不参与测向。
 // =============================================================================
 #include "GN902.h"
 #include <cctype>      // 新增: std::tolower
@@ -494,6 +500,28 @@ void SpoofingDoa::setGNSSData(const GNSSData *data, int dataLen)
     saveGNSSData(data, dataLen);
 }
 
+// ★ 新增: 仅用一批校正刀数据刷新通道校正, 不触发检测/测向
+void SpoofingDoa::updateCorrectionOnly(const GNSSData *data, int dataLen)
+{
+    if (data == 0 || dataLen <= 0)
+    {
+        return;
+    }
+
+    std::vector<std::vector<SatelliteDataPhaseDiffA>> dataA;
+    dataA.reserve(dataLen);
+    for (int i = 0; i < dataLen; ++i)
+    {
+        std::vector<SatelliteDataPhaseDiffA> tp;
+        // 校正刀: snrFilter=false, 保留单端口卫星(相位差 -1)
+        getSatelliteDataPhaseDiffA(data[i], tp, false);
+        dataA.emplace_back(tp);
+    }
+    setCorrectionData(dataA);
+
+    PublicSpace::Log("updateCorrectionOnly: refreshed correction from %d frames\n", dataLen);
+}
+
 void SpoofingDoa::collectPhaseDiffData(const GNSSData &data, std::vector<SatelliteDataPhaseDiffA> &dataA)
 {
     vector<SatelliteDataPhaseDiffA> raw;
@@ -932,9 +960,11 @@ void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 
 void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA)
 {
-    vector<double> samples;
-    double sumSnr1 = 0.0;
-    double sumSnr2 = 0.0;
+    // 1) 收集有效样本（SNR 有效才参与）
+    std::vector<double> samples;   // 单位：度，原始相位差
+    std::vector<double> snr1s;     // 与 samples 一一对应的 SNR1
+    std::vector<double> snr2s;     // 与 samples 一一对应的 SNR2
+
     int length = dataB.i_diffLen;
     for (int i = 0; i < length; ++i)
     {
@@ -943,13 +973,13 @@ void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhas
             continue;
         }
         samples.emplace_back(dataB.i_phase_diff[i] * 360.0);
-        sumSnr1 += dataB.i_Snr1[i];
-        sumSnr2 += dataB.i_Snr2[i];
+        snr1s.emplace_back(dataB.i_Snr1[i]);
+        snr2s.emplace_back(dataB.i_Snr2[i]);
     }
 
-    dataA.i_Sys = dataB.i_Sys;
+    dataA.i_Sys  = dataB.i_Sys;
     dataA.i_Type = dataB.i_Type;
-    dataA.i_Prn = dataB.i_Prn;
+    dataA.i_Prn  = dataB.i_Prn;
 
     int n = (int)samples.size();
     if (n <= 0)
@@ -960,40 +990,118 @@ void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhas
         return;
     }
 
-    int required = (length < MIN_STABLE_SAMPLES) ? length : MIN_STABLE_SAMPLES;
-    if (n < required)
+    // 2) 半周归一化：把样本统一到 [0, 180) 附近，消除 180° 跳变
+    //    做法：以第一个样本为参考，把与之相差接近 180° 的样本加/减 180°
+    std::vector<double> normSamples = samples;
+    for (int i = 1; i < n; ++i)
     {
-        dataA.i_phase_diff = 0.0;
-        dataA.i_Snr1 = 0.0;
-        dataA.i_Snr2 = 0.0;
-        return;
-    }
-
-    if (circularSpanDeg(samples) < STABILITY_RANGE_DEG)
-    {
-        double smoothDeg = circularMeanDeg(samples);
-        double smoothCycle = smoothDeg / 360.0;
-        if (smoothCycle < 0)
+        double diff = normalizeAngle180(normSamples[i] - normSamples[0]);
+        if (std::fabs(std::fabs(diff) - 180.0) < STABILITY_RANGE_DEG)
         {
-            smoothCycle += 1.0;
+            // 接近反相：整体平移 180°，使它与参考样本同相
+            if (diff > 0)
+            {
+                normSamples[i] -= 180.0;
+            }
+            else
+            {
+                normSamples[i] += 180.0;
+            }
         }
-        dataA.i_phase_diff = smoothCycle;
-        dataA.i_Snr1 = sumSnr1 / n;
-        dataA.i_Snr2 = sumSnr2 / n;
-        return;
     }
 
-    if (circularSpan180Deg(samples) < STABILITY_RANGE_DEG)
+    // 3) 在归一化样本上迭代剔除离群点，直到稳定或样本不足
+    std::vector<int> keepIdx;      // 保留样本在 samples 中的下标
+    keepIdx.reserve(n);
+    for (int i = 0; i < n; ++i)
+    {
+        keepIdx.push_back(i);
+    }
+
+    const int    MAX_ITER      = 5;     // 最多迭代剔除轮数
+    const int    MIN_KEEP      = (n < MIN_STABLE_SAMPLES) ? n : MIN_STABLE_SAMPLES;
+    const double SPAN_LIMIT    = STABILITY_RANGE_DEG;   // 稳定范围阈值（度）
+
+    for (int iter = 0; iter < MAX_ITER; ++iter)
+    {
+        if ((int)keepIdx.size() <= MIN_KEEP)
+        {
+            break;
+        }
+
+        // 计算当前保留样本的圆周均值（在归一化空间）
+        std::vector<double> cur;
+        cur.reserve(keepIdx.size());
+        for (int idx : keepIdx)
+        {
+            cur.push_back(normSamples[idx]);
+        }
+        double mean = circularMeanDeg(cur);
+
+        // 找离均值最远的样本
+        int    worstPos = -1;
+        double worstDist = 0.0;
+        for (int k = 0; k < (int)keepIdx.size(); ++k)
+        {
+            double d = std::fabs(normalizeAngle180(normSamples[keepIdx[k]] - mean));
+            if (d > worstDist)
+            {
+                worstDist = d;
+                worstPos  = k;
+            }
+        }
+
+        // 如果最远样本已在稳定范围内，停止剔除
+        if (worstPos < 0 || worstDist <= SPAN_LIMIT)
+        {
+            break;
+        }
+
+        // 剔除最远样本
+        keepIdx.erase(keepIdx.begin() + worstPos);
+    }
+
+    // 4) 保留样本不足，退化为置 0（但保留原始 SNR，不再丢星）
+    if ((int)keepIdx.size() < MIN_STABLE_SAMPLES)
     {
         dataA.i_phase_diff = 0.0;
-        dataA.i_Snr1 = 0.0;
-        dataA.i_Snr2 = 0.0;
+        // ★ 保留原始 SNR 均值，避免整颗星在后续被 SNR=0 丢弃
+        double sum1 = 0.0, sum2 = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            sum1 += snr1s[i];
+            sum2 += snr2s[i];
+        }
+        dataA.i_Snr1 = (float)(sum1 / n);
+        dataA.i_Snr2 = (float)(sum2 / n);
         return;
     }
 
-    dataA.i_phase_diff = 0.0;
-    dataA.i_Snr1 = 0.0;
-    dataA.i_Snr2 = 0.0;
+    // 5) 用保留的稳定样本做圆周均值
+    std::vector<double> keepSamples;
+    keepSamples.reserve(keepIdx.size());
+    double sumSnr1 = 0.0;
+    double sumSnr2 = 0.0;
+    for (int idx : keepIdx)
+    {
+        keepSamples.push_back(normSamples[idx]);
+        sumSnr1 += snr1s[idx];
+        sumSnr2 += snr2s[idx];
+    }
+
+    double smoothDeg = circularMeanDeg(keepSamples);
+
+    // 6) 把归一化后的均值折回 [0, 360)
+    double smoothCycle = smoothDeg / 360.0;
+    smoothCycle = fmod(smoothCycle, 1.0);
+    if (smoothCycle < 0)
+    {
+        smoothCycle += 1.0;
+    }
+
+    dataA.i_phase_diff = smoothCycle;
+    dataA.i_Snr1 = (float)(sumSnr1 / keepIdx.size());
+    dataA.i_Snr2 = (float)(sumSnr2 / keepIdx.size());
 }
 
 void SpoofingDoa::getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
@@ -2521,8 +2629,7 @@ std::vector<GN902 *> GN902Container;
 //           兼容旧约定 {1,1}。
 //   测向刀: 参考天线(通道1)固定为天线 1, 通道2 在天线 2..7 间循环切换。
 // 注意: 天线对映射失败时 GN902::SetData 会整帧丢弃。校正刀({7,7})映射失败只影响
-//       校正数据刷新; 但六测向刀({1,2}..{1,7})映射失败会让轮边界(见下方 SetData 中
-//       doaMask==0x7E 的判断)凑不齐, Detect()/Doa() 只能靠校正刀兜底触发, 表现为
+//       校正数据刷新; 但六测向刀({1,2}..{1,7})映射失败会让轮边界凑不齐, 表现为
 //       "输出稀疏/完全无输出"。改天线对约定时这里必须同步。
 static int mapPairToCutIndex(int cutIdx_1, int cutIdx_2)
 {
@@ -2764,11 +2871,21 @@ GN902::GN902(){
     st->eng = new SpoofingDoa();
     if (st->eng != 0)
     {
+        // 引擎仍按 "1 校正刀 + 6 测向刀" 的一轮模板工作
         st->eng->configCyclicRuntime(true, 0, false, 0.1865);
         const int cutSeq[14] = {7, 7, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7};
         st->eng->setCutSquence(14, cutSeq);
     }
     g_gn902State[this] = st;
+
+    // ★ 初始化切刀调度状态
+    m_doaCutCounter = 0;
+    m_calCutReady   = false;
+    for (int i = 0; i < 6; ++i)
+    {
+        memset(&m_recentDoaCut[i], 0, sizeof(GNSSData));
+        m_recentDoaCutValid[i] = false;
+    }
 
     gn902LoadConfig();
 
@@ -2890,6 +3007,12 @@ void GN902::SetCutnumThreshold(int thresholdCount){
 // @param data 数据指针
 // @param cutIdx_1 通道1天线索引(参考天线，固定为1)
 // @param cutIdx_2 通道2天线索引(1=校正, 2..7=六测向刀)
+//
+// ★ 切刀调度(本次改造核心):
+//   - 校正刀 {7,7}: 立即刷新通道校正(updateCorrectionOnly), 不参与测向、不触发测向;
+//   - 测向刀 {1,2}..{1,7}: 每个刀型只缓存"最近一帧", 存入 m_recentDoaCut[cut-1];
+//   - 当六个测向刀都就绪时, 用最近6刀组批测向(runDetectAndDoa), 随后清空就绪标记;
+//   - "每 400 个测向刀才切 1 次校正刀" 由上位机调用节奏保证, 本层只做统计/日志。
 void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
 {
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
@@ -2909,7 +3032,6 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
     }
 
     // 保存上位机传入的原始帧（由 gn902_config.txt 控制，默认关闭）
-    // 注意: 此处保存的是清洗后的数据, 与"实际喂进算法"一致。
     saveInputGnssData(st, m_InstanceId, &cleaned, cutIdx_1, cutIdx_2);
 
     // 固定基线采集 {8,9}/{9,8}
@@ -2922,30 +3044,137 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
     int cut = mapPairToCutIndex(cutIdx_1, cutIdx_2);
     if (cut < 0) return;   // 非标准天线对，忽略
 
-    // ★ 检测切刀变化：当前 cut 与上一次不同，说明上一刀已结束
-    if (st->lastCut != -1 && st->lastCut != cut)
+    // ================= 校正刀 (cut == 0) =================
+    if (cut == 0)
     {
-        // 保存上一刀的完整 8 帧数据
-        st->completeCutData[st->lastCut] = st->currentCutBuf[st->lastCut];
-        st->currentCutBuf[st->lastCut].clear();
+        // 校正刀到达: 刷新 completeCutData[0] 供下次组批使用, 并立即刷新校正偏移
+        st->completeCutData[0].clear();
+        st->completeCutData[0].push_back(cleaned);
+        m_calCutReady = true;
 
-        // 立即用所有刀的最新完整数据触发检测与测向
-        Detect();
-        Doa();
-    }
-    st->lastCut = cut;
+        if (st->eng != 0)
+        {
+            st->eng->updateCorrectionOnly(&cleaned, 1);
+        }
 
-    // 将当前帧加入当前刀的缓冲区
-    std::vector<GNSSData>& buf = st->currentCutBuf[cut];
-    buf.push_back(cleaned);
-    if (buf.size() > 8)          // 每刀最多保留最近 8 帧
-    {
-        buf.erase(buf.begin());
+        GN902Log(m_InstanceId,
+                 "[ID=%d] SetData: CAL cut received (pair=(%d,%d)), doaCounter=%lld, correction refreshed\n",
+                 m_InstanceId, cutIdx_1, cutIdx_2, m_doaCutCounter);
+        return;   // ★ 校正刀不触发测向
     }
+
+    // ================= 测向刀 (cut = 1..6) =================
+    int doaIdx = cut - 1;   // 0..5 对应 {1,2}..{1,7}
+    if (doaIdx < 0 || doaIdx >= 6) return;
+
+    // 每个刀型只保留"最近一帧"
+    m_recentDoaCut[doaIdx]      = cleaned;
+    m_recentDoaCutValid[doaIdx] = true;
+
+    ++m_doaCutCounter;
 
     GN902Log(m_InstanceId,
-             "[ID=%d] SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d\n",
-             m_InstanceId, cutIdx_1, cutIdx_2, cut, cleaned.i_PortOneNum, cleaned.i_PortTwoNum, (int)buf.size());
+             "[ID=%d] SetData: DOA cut=%d (pair=(%d,%d)) doaCounter=%lld valid=%d%d%d%d%d%d\n",
+             m_InstanceId, cut, cutIdx_1, cutIdx_2, m_doaCutCounter,
+             (int)m_recentDoaCutValid[0], (int)m_recentDoaCutValid[1], (int)m_recentDoaCutValid[2],
+             (int)m_recentDoaCutValid[3], (int)m_recentDoaCutValid[4], (int)m_recentDoaCutValid[5]);
+
+    // 触发条件: 六个测向刀都就绪时, 用最近6刀做一次测向
+    bool allValid = true;
+    for (int i = 0; i < 6; ++i)
+    {
+        if (!m_recentDoaCutValid[i]) { allValid = false; break; }
+    }
+
+    if (allValid)
+    {
+        runDetectAndDoa();
+
+        // 测向后清空测向刀就绪标记, 开始累积下一轮
+        for (int i = 0; i < 6; ++i)
+        {
+            m_recentDoaCutValid[i] = false;
+        }
+    }
+}
+
+// ★ 新增: 组批(1 校正刀 + 6 测向刀)并喂引擎, 完成后取出结果写入 GN902State::result。
+//   引擎侧期望每刀 8 帧、开启多帧平滑; 校正刀若本轮没有新数据则补空帧,
+//   此时引擎内 setCorrectionData 会因 dataA.size() != m_cutSequence.size() 而跳过,
+//   从而沿用上一次的校正偏移(安全)。
+void GN902::runDetectAndDoa()
+{
+    std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
+    if (it == g_gn902State.end() || it->second->eng == 0) return;
+    GN902State *st = it->second;
+
+    const int FRAMES_PER_CUT = 8;   // 引擎期望每刀 8 帧(不足补空帧)
+    std::vector<GNSSData> batch;
+    batch.reserve(7 * FRAMES_PER_CUT);
+
+    GNSSData empty;
+    memset(&empty, 0, sizeof(empty));
+
+    // --- 索引 0: 校正刀 ---
+    {
+        const std::vector<GNSSData>& calVec = st->completeCutData[0];
+        if (!calVec.empty())
+        {
+            size_t start = (calVec.size() > (size_t)FRAMES_PER_CUT) ? calVec.size() - FRAMES_PER_CUT : 0;
+            for (size_t i = start; i < calVec.size(); ++i)
+                batch.push_back(calVec[i]);
+            for (size_t i = calVec.size() - start; i < (size_t)FRAMES_PER_CUT; ++i)
+                batch.push_back(empty);
+        }
+        else
+        {
+            for (int i = 0; i < FRAMES_PER_CUT; ++i)
+                batch.push_back(empty);
+        }
+    }
+
+    // --- 索引 1..6: 六个测向刀, 每刀用最近一帧复制成 8 帧 ---
+    for (int d = 0; d < 6; ++d)
+    {
+        for (int f = 0; f < FRAMES_PER_CUT; ++f)
+            batch.push_back(m_recentDoaCut[d]);
+    }
+
+    st->eng->configCyclicRuntime(true, FRAMES_PER_CUT, true, 0.0);
+    st->eng->setGNSSData(batch.data(), (int)batch.size());
+
+    GN902Log(m_InstanceId,
+             "[ID=%d] runDetectAndDoa: batchSize=%d (1 cal + 6 doa) * %d frames, calReady=%d\n",
+             m_InstanceId, (int)batch.size(), FRAMES_PER_CUT, (int)m_calCutReady);
+
+    // 取出结果
+    st->clearResult();
+    st->eng->getAngleSpoofingDoa(st->result);
+
+    GN902Log(m_InstanceId, "[ID=%d] Doa: 报警频点数=%d\n", m_InstanceId, st->result.i_Count);
+    for (int i = 0; i < st->result.i_Count; ++i)
+    {
+        GN902Log(m_InstanceId,
+                 "[ID=%d] Sys=%d Type=%d Count=%d Angle=%.2f Alarm=%d\n",
+                 m_InstanceId,
+                 st->result.i_SatelliteAngle[i].i_Sys,
+                 st->result.i_SatelliteAngle[i].i_Type,
+                 st->result.i_SatelliteAngle[i].i_Count,
+                 st->result.i_SatelliteAngle[i].i_Angle,
+                 st->result.i_SatelliteAngle[i].i_Alarm);
+    }
+}
+
+// 兼容旧入口: 委托新的组批逻辑
+void GN902::Detect()
+{
+    runDetectAndDoa();
+}
+
+// 兼容旧入口: 结果已在 runDetectAndDoa 内取出, 此处不再重复调用
+void GN902::Doa()
+{
+    // no-op
 }
 
 // 获取结果
@@ -2988,79 +3217,5 @@ void GN902::GetAlarmMoments(std::vector<AlarmMoment>& out){
         return;
     }
     out = it->second->eng->getAlarmMoments();
-    return;
-}
-
-// 检测
-void GN902::Detect()
-{
-    std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
-    if (it == g_gn902State.end() || it->second->eng == 0) return;
-    GN902State *st = it->second;
-
-    std::vector<GNSSData> batch;
-    const int FRAMES_PER_CUT = 8;
-
-    // 按顺序：校正刀(0) 的 8 帧，刀1 的 8 帧，……，刀6 的 8 帧
-    for (int cut = 0; cut < 7; ++cut)
-    {
-        const std::vector<GNSSData>& dataVec = st->completeCutData[cut];
-        if (dataVec.empty())
-        {
-            // 还没有完整数据，用空帧占位
-            GNSSData empty;
-            memset(&empty, 0, sizeof(empty));
-            for (int i = 0; i < FRAMES_PER_CUT; ++i)
-                batch.push_back(empty);
-        }
-        else
-        {
-            // 取最近的 8 帧（如果超过 8 帧，取后 8 帧）
-            size_t start = (dataVec.size() > FRAMES_PER_CUT) ? dataVec.size() - FRAMES_PER_CUT : 0;
-            for (size_t i = start; i < dataVec.size(); ++i)
-                batch.push_back(dataVec[i]);
-            // 不足 8 帧则补空帧
-            for (size_t i = dataVec.size() - start; i < FRAMES_PER_CUT; ++i)
-            {
-                GNSSData empty;
-                memset(&empty, 0, sizeof(empty));
-                batch.push_back(empty);
-            }
-        }
-    }
-
-    // 配置引擎：每刀 8 帧，开启平滑
-    st->eng->configCyclicRuntime(true, FRAMES_PER_CUT, true, 0.0);
-    st->eng->setGNSSData(batch.data(), (int)batch.size());
-
-    GN902Log(m_InstanceId,
-             "[ID=%d] Detect: batchSize=%d (7 cuts * %d frames)\n",
-             m_InstanceId, (int)batch.size(), FRAMES_PER_CUT);
-}
-
-// 测向
-void GN902::Doa(){
-    std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
-    if (it == g_gn902State.end() || it->second->eng == 0)
-    {
-        return;
-    }
-    GN902State *st = it->second;
-    st->clearResult();
-    st->eng->getAngleSpoofingDoa(st->result);
-
-    // ★ 独立日志记录本轮测向结果
-    GN902Log(m_InstanceId, "[ID=%d] Doa: 报警频点数=%d\n", m_InstanceId, st->result.i_Count);
-    for (int i = 0; i < st->result.i_Count; ++i)
-    {
-        GN902Log(m_InstanceId,
-                 "[ID=%d] Sys=%d Type=%d Count=%d Angle=%.2f Alarm=%d\n",
-                 m_InstanceId,
-                 st->result.i_SatelliteAngle[i].i_Sys,
-                 st->result.i_SatelliteAngle[i].i_Type,
-                 st->result.i_SatelliteAngle[i].i_Count,
-                 st->result.i_SatelliteAngle[i].i_Angle,
-                 st->result.i_SatelliteAngle[i].i_Alarm);
-    }
     return;
 }
