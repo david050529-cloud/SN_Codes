@@ -1091,6 +1091,95 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
                      m_Cyclic_Detection_Flag, m_OneCut_Frams, m_Smooth_Flag, m_omni_R);
 }
 
+// =============================================================================
+// 单刀预处理: 把该刀的多帧原始数据喂给引擎已有的预处理链, 输出该刀最终相位差。
+// 复用引擎里已有的:
+//   - getSatelliteDataPhaseDiffA : 逐帧提取, 逐星相位差(周)
+//   - getSatelliteDataPhaseDiffB : 按帧排列成逐星多帧结构(i_diffLen = 帧数)
+//   - calSmoothData              : 跳半周判定 + 圆周平滑, 多帧 -> 1 个相位差
+//   - calCorrecteData            : 用 m_CorrectionData 校正
+// 不跑报警确认/基线累积/测向。
+// =============================================================================
+void SpoofingDoa::finalizeSingleCut(const std::vector<GNSSData> &frames,
+                                    std::vector<SatelliteDataPhaseDiffA> &out)
+{
+    out.clear();
+    if (frames.empty())
+    {
+        return;
+    }
+
+    // 1) 逐帧提取相位差(与 setDataAngle 一致, 非校正刀做 SNR 过滤)
+    std::vector<std::vector<SatelliteDataPhaseDiffA>> dataA;
+    dataA.reserve(frames.size());
+    for (size_t i = 0; i < frames.size(); ++i)
+    {
+        std::vector<SatelliteDataPhaseDiffA> tp;
+        getSatelliteDataPhaseDiffA(frames[i], tp, true);
+        dataA.emplace_back(tp);
+    }
+
+    // 2) 合并成"单刀多帧"结构: 每星一条, i_diffLen = 帧数。
+    //    先不整星剔除(按有效样本数判定交给 calSmoothData)。
+    std::vector<SatelliteDataPhaseDiffB> dataB;
+    {
+        int savedDeletePrnFlag = m_Delete_Prn_Flag;
+        m_Delete_Prn_Flag = 0;
+        getSatelliteDataPhaseDiffB(dataA, dataB);
+        m_Delete_Prn_Flag = savedDeletePrnFlag;
+    }
+
+    // 3) 逐星做跳半周 + 圆周平滑, 再应用通道校正。
+    //    calSmoothData 判无效时把 SNR 置 0, 据此过滤。
+    out.reserve(dataB.size());
+    for (size_t i = 0; i < dataB.size(); ++i)
+    {
+        SatelliteDataPhaseDiffA tp;
+        calSmoothData(dataB[i], tp);
+
+        if (tp.i_Snr1 < 1e-3f || tp.i_Snr2 < 1e-3f)
+        {
+            continue;
+        }
+
+        calCorrecteData(tp);
+        out.emplace_back(tp);
+    }
+}
+
+// =============================================================================
+// 由"各刀最终相位差"组装跨刀基线: 每星一条, 数组索引 = 切刀序号。
+// =============================================================================
+void SpoofingDoa::buildBaselinesFromCutPhaseDiffs(
+    const std::vector<std::vector<SatelliteDataPhaseDiffA>> &cutPhaseDiffs,
+    std::vector<SatelliteDataPhaseDiffB> &doaDataB)
+{
+    doaDataB.clear();
+    if (cutPhaseDiffs.size() < m_cutSequence.size())
+    {
+        return;
+    }
+
+    int savedDeletePrnFlag = m_Delete_Prn_Flag;
+    m_Delete_Prn_Flag = 0;   // 缺刀不整星剔除, 由 calAngleUseAntenna 按有效刀数处理
+    getSatelliteDataPhaseDiffB(cutPhaseDiffs, doaDataB);
+    m_Delete_Prn_Flag = savedDeletePrnFlag;
+}
+
+// =============================================================================
+// 用给定跨刀基线直接测向(不跑报警确认/连续计数/基线累积)
+// =============================================================================
+void SpoofingDoa::doaByBaselines(const std::vector<SatelliteDataPhaseDiffB> &doaDataB,
+                                 SpoofingResult &result)
+{
+    m_AngleResultData.clear();
+
+    std::map<int, std::map<int, InterferInfo>> inferInfoData;
+    setInterferInfoDataOmni(doaDataB, inferInfoData);
+    calAngle(inferInfoData);
+    setSpoofingResult(result);
+}
+
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     int cutNum = (int)dataA.size();
@@ -2784,6 +2873,15 @@ void GN902::SetInstanceId(int id)
 }
 
 GN902::GN902(){
+    // ★ 切刀收口状态初始化
+    for (int i = 0; i < 7; ++i)
+    {
+        m_cutFinalized[i] = false;
+        m_cutFinalPhaseDiff[i].clear();
+    }
+    memset(&m_resultCache, 0, sizeof(m_resultCache));
+    m_hasDoa = false;
+
     GN902State *st = new GN902State();
     st->eng = new SpoofingDoa();
     if (st->eng != 0)
@@ -2930,20 +3028,14 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
     int cut = mapPairToCutIndex(cutIdx_1, cutIdx_2);
     if (cut < 0) return;   // 非标准天线对，忽略
 
-    // ★ 检测切刀变化：当前 cut 与上一次不同，说明上一刀已结束
+    // ★ 检测切刀变化：当前 cut 与上一次不同，说明上一刀已结束，收口并触发检测/测向
     if (st->lastCut != -1 && st->lastCut != cut)
     {
-        // 保存上一刀的完整 8 帧数据
-        st->completeCutData[st->lastCut] = st->currentCutBuf[st->lastCut];
+        OnCutFinished(st->lastCut);
         st->currentCutBuf[st->lastCut].clear();
-
-        // 立即用所有刀的最新完整数据触发检测与测向
-        Detect();
-        Doa();
     }
-    st->lastCut = cut;
 
-    // 将当前帧（清洗后）加入当前刀的缓冲区
+    // ★ 切刀内只累积原始帧, 不做任何检测/测向
     std::vector<GNSSData>& buf = st->currentCutBuf[cut];
     buf.push_back(clean);
     if (buf.size() > 8)          // 每刀最多保留最近 8 帧
@@ -2951,8 +3043,10 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
         buf.erase(buf.begin());
     }
 
+    st->lastCut = cut;
+
     GN902Log(m_InstanceId,
-             "[ID=%d] SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d\n",
+             "[ID=%d] SetData: pair=(%d,%d) cut=%d PortOneNum=%d PortTwoNum=%d bufSize=%d (切刀内不触发)\n",
              m_InstanceId, cutIdx_1, cutIdx_2, cut, clean.i_PortOneNum, clean.i_PortTwoNum, (int)buf.size());
 }
 
@@ -2997,6 +3091,130 @@ void GN902::GetAlarmMoments(std::vector<AlarmMoment>& out){
     }
     out = it->second->eng->getAlarmMoments();
     return;
+}
+
+// =============================================================================
+// 切刀结束(切换)时调用
+//   1) 用引擎预处理链把该刀多帧收成"该刀最终相位差"(含跳半周/平滑/校正), 缓存;
+//   2) 六测向刀都收口过 => 完整 Detect(报警确认+基线累积, 维护 m_Tracking/m_Baselines),
+//      再用六刀最终相位差做一次测向, 刷新结果。
+// 结果刷新频率 = 每刀结束一次。
+// =============================================================================
+void GN902::OnCutFinished(int finishedCut)
+{
+    if (finishedCut < 0 || finishedCut > 6)
+    {
+        return;
+    }
+    std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
+    if (it == g_gn902State.end() || it->second->eng == 0)
+    {
+        return;
+    }
+    GN902State *st = it->second;
+
+    // 1) 收口该刀: 复用引擎已有的跳半周/平滑/校正
+    std::vector<SatelliteDataPhaseDiffA> finalDiff;
+    st->eng->finalizeSingleCut(st->currentCutBuf[finishedCut], finalDiff);
+    m_cutFinalPhaseDiff[finishedCut] = finalDiff;
+    m_cutFinalized[finishedCut] = true;
+
+    // 2) 供完整 Detect 组批用
+    st->completeCutData[finishedCut] = st->currentCutBuf[finishedCut];
+
+    GN902Log(m_InstanceId,
+             "[ID=%d] OnCutFinished: cut=%d frames=%d 有效星=%d\n",
+             m_InstanceId, finishedCut,
+             (int)st->currentCutBuf[finishedCut].size(),
+             (int)finalDiff.size());
+
+    // 3) 六测向刀是否都收口过
+    bool allDoa = true;
+    for (int c = 1; c <= 6; ++c)
+    {
+        if (!m_cutFinalized[c]) { allDoa = false; break; }
+    }
+    if (!allDoa)
+    {
+        GN902Log(m_InstanceId,
+                 "[ID=%d] OnCutFinished: cut=%d 已收口, 六测向刀未齐, 仅缓存\n",
+                 m_InstanceId, finishedCut);
+        return;
+    }
+
+    // 4) 完整 Detect: 六刀齐时跑一次, 维护 m_Tracking(报警簇) 与 m_Baselines
+    {
+        const int cutNum = 7;
+        int framesPerCut = -1;
+        bool uniform = true;
+        for (int cut = 0; cut < cutNum; ++cut)
+        {
+            int n = (int)st->completeCutData[cut].size();
+            if (n <= 0) { uniform = false; break; }
+            if (framesPerCut < 0) framesPerCut = n;
+            else if (n != framesPerCut) { uniform = false; break; }
+        }
+
+        std::vector<GNSSData> batch;
+        if (uniform && framesPerCut > 0)
+        {
+            batch.reserve((size_t)cutNum * framesPerCut);
+            for (int cut = 0; cut < cutNum; ++cut)
+            {
+                const std::vector<GNSSData>& v = st->completeCutData[cut];
+                size_t start = (v.size() > (size_t)framesPerCut) ? v.size() - framesPerCut : 0;
+                for (size_t i = start; i < v.size(); ++i) batch.push_back(v[i]);
+            }
+            st->eng->configCyclicRuntime(true, framesPerCut, framesPerCut > 1, 0.0);
+        }
+        else
+        {
+            // 帧数不一致(或某刀暂无数据) -> 每刀退回"取末帧"单帧模式
+            batch.reserve(cutNum);
+            for (int cut = 0; cut < cutNum; ++cut)
+            {
+                const std::vector<GNSSData>& v = st->completeCutData[cut];
+                if (!v.empty()) batch.push_back(v.back());
+                else { GNSSData e; memset(&e, 0, sizeof(e)); batch.push_back(e); }
+            }
+            st->eng->configCyclicRuntime(true, 1, false, 0.0);
+        }
+        st->eng->setGNSSData(batch.data(), (int)batch.size());
+        st->clearResult();
+        st->eng->getAngleSpoofingDoa(st->result);
+    }
+
+    // 5) 用六刀最终相位差做一次测向, 刷新结果
+    {
+        std::vector<std::vector<SatelliteDataPhaseDiffA>> cutFinal(
+            m_cutFinalPhaseDiff, m_cutFinalPhaseDiff + 7);
+        std::vector<SatelliteDataPhaseDiffB> doaDataB;
+        st->eng->buildBaselinesFromCutPhaseDiffs(cutFinal, doaDataB);
+
+        if (!doaDataB.empty())
+        {
+            SpoofingResult r;
+            memset(&r, 0, sizeof(r));
+            st->eng->doaByBaselines(doaDataB, r);
+            m_resultCache = r;
+            m_hasDoa = true;
+            st->result = r;
+
+            GN902Log(m_InstanceId,
+                     "[ID=%d] OnCutFinished: cut=%d 测向完成 baselines=%d 报警频点=%d\n",
+                     m_InstanceId, finishedCut, (int)doaDataB.size(), r.i_Count);
+            for (int i = 0; i < r.i_Count; ++i)
+            {
+                GN902Log(m_InstanceId,
+                         "[ID=%d]   Sys=%d Type=%d Count=%d Angle=%.2f\n",
+                         m_InstanceId,
+                         r.i_SatelliteAngle[i].i_Sys,
+                         r.i_SatelliteAngle[i].i_Type,
+                         r.i_SatelliteAngle[i].i_Count,
+                         r.i_SatelliteAngle[i].i_Angle);
+            }
+        }
+    }
 }
 
 // 检测

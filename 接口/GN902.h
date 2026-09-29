@@ -524,6 +524,34 @@ public:
      */
     void configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR);
 
+    /**
+     * @brief 对"单刀多帧"做预处理: 逐帧提取相位差 + 跳半周 + 圆周平滑 + 通道校正,
+     *        输出该刀最终逐星相位差(每星一条)。
+     * @param frames 该刀原始帧(通常 8 帧)
+     * @param out    输出: 该刀最终相位差(SatelliteDataPhaseDiffA 列表)
+     * @note 内部复用 getSatelliteDataPhaseDiffA / getSatelliteDataPhaseDiffB /
+     *       calSmoothData / calCorrecteData, 不跑报警确认/基线累积/测向。
+     */
+    void finalizeSingleCut(const std::vector<GNSSData> &frames,
+                           std::vector<SatelliteDataPhaseDiffA> &out);
+
+    /**
+     * @brief 由"各刀最终相位差"组装跨刀基线(每星一条, 数组索引=切刀序号)
+     * @param cutPhaseDiffs 各刀最终相位差(索引 0=校正刀, 1..6=测向刀)
+     * @param doaDataB      输出: 跨刀基线
+     */
+    void buildBaselinesFromCutPhaseDiffs(
+        const std::vector<std::vector<SatelliteDataPhaseDiffA>> &cutPhaseDiffs,
+        std::vector<SatelliteDataPhaseDiffB> &doaDataB);
+
+    /**
+     * @brief 用给定跨刀基线直接测向(不跑报警确认/连续计数/基线累积)
+     * @param doaDataB 跨刀基线
+     * @param result   输出: 测向结果
+     */
+    void doaByBaselines(const std::vector<SatelliteDataPhaseDiffB> &doaDataB,
+                        SpoofingResult &result);
+
 private:
     // ---- PreparationData.cpp: 数据预处理 ----
     void getSatelliteDataPhaseDiffA(const GNSSData &data, vector<SatelliteDataPhaseDiffA> &dataA, bool snrFilter = true);
@@ -776,4 +804,24 @@ private:
 
     void Detect();  ///< 整轮组批并喂入引擎, 完成循环切刀欺骗检测与跟踪
     void Doa();     ///< 从引擎取出本轮测向结果
+
+    /**
+     * @brief 切刀结束(切换)时的统一入口
+     *        1) 调引擎预处理链, 得到该刀最终相位差并缓存;
+     *        2) 六测向刀都收口过 => 完整 Detect(报警确认+基线累积) + 测向刷新结果。
+     * @param finishedCut 刚结束的切刀序号(0=校正刀, 1..6=测向刀)
+     */
+    void OnCutFinished(int finishedCut);
+
+    /// 各刀最终逐星相位差(索引 0=校正刀, 1..6=测向刀)
+    std::vector<SatelliteDataPhaseDiffA> m_cutFinalPhaseDiff[7];
+
+    /// 各刀是否至少收口过一次(一旦为真保持为真, 用于判定"六刀齐")
+    bool m_cutFinalized[7];
+
+    /// 最近一次测向结果缓存
+    SpoofingResult m_resultCache;
+
+    /// 是否已产生过测向结果
+    bool m_hasDoa;
 };

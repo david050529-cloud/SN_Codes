@@ -7,9 +7,9 @@
 
 // #define DOA_DEBUG
 #ifdef _WIN32
- char Version[] = "V1.3.0";
+ char Version[] = "V1.3.1";
 #else
- char Version[] = "V1.3.0";
+ char Version[] = "V1.3.1";
 #endif
 
 using namespace std;
