@@ -2787,11 +2787,12 @@ GN902::GN902(){
     GN902State *st = new GN902State();
     st->eng = new SpoofingDoa();
     if (st->eng != 0)
-    {
-        st->eng->configCyclicRuntime(true, 0, false, 0.1865);
-        const int cutSeq[14] = {7, 7, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7};
-        st->eng->setCutSquence(14, cutSeq);
-    }
+        {
+            // ★ 每刀 1 帧、不平滑; 半径沿用默认 0.1865
+            st->eng->configCyclicRuntime(true, 1, false, 0.1865);
+            const int cutSeq[14] = {7, 7, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7};
+            st->eng->setCutSquence(14, cutSeq);
+        }
     g_gn902State[this] = st;
 
     gn902LoadConfig();
@@ -2905,6 +2906,8 @@ void GN902::SetCutnumThreshold(int thresholdCount){
 // @param data 数据指针
 // @param cutIdx_1 通道1天线索引(参考天线，固定为1)
 // @param cutIdx_2 通道2天线索引(1=校正, 2..7=六测向刀)
+// 约定: 每轮 = 6 个测向刀(每刀 8 秒数据) + 1 个校正刀。
+//       收到校正刀时表示上一轮结束, 用上一轮完整数据触发一次 Detect/Doa。
 void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
 {
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
@@ -2916,7 +2919,6 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
     saveInputGnssData(st, data, cutIdx_1, cutIdx_2);
 
     // ★ 数据清洗: 复制一份再清洗, 不动调用方内存。
-    //   清洗规则见文件头部说明与 gn902CleanGnssData()。
     GNSSData clean = *data;
     gn902CleanGnssData(clean, m_InstanceId, cutIdx_1, cutIdx_2);
 
@@ -2930,25 +2932,69 @@ void GN902::SetData(const GNSSData* data, int cutIdx_1, int cutIdx_2)
     int cut = mapPairToCutIndex(cutIdx_1, cutIdx_2);
     if (cut < 0) return;   // 非标准天线对，忽略
 
-    // ★ 检测切刀变化：当前 cut 与上一次不同，说明上一刀已结束
+    // ★ 切刀变化: 保存上一刀的完整数据
     if (st->lastCut != -1 && st->lastCut != cut)
     {
-        // 保存上一刀的完整 8 帧数据
         st->completeCutData[st->lastCut] = st->currentCutBuf[st->lastCut];
-        st->currentCutBuf[st->lastCut].clear();
-
-        // 立即用所有刀的最新完整数据触发检测与测向
-        Detect();
-        Doa();
     }
+
+    // ★ 轮边界: 收到校正刀, 且上一轮刚结束(lastCut != 0)
+    //   使用上一轮已完成的数据(校正刀 0 + 6 个测向刀 1..6)触发一次 Detect/Doa
+    if (cut == 0 && st->lastCut != -1 && st->lastCut != 0)
+    {
+        bool allReady = true;
+        for (int i = 0; i <= 6; ++i)
+        {
+            if (st->completeCutData[i].empty())
+            {
+                allReady = false;
+                break;
+            }
+        }
+
+        if (allReady)
+        {
+            Detect();
+            Doa();
+        }
+        else
+        {
+            GN902Log(m_InstanceId,
+                     "[ID=%d] SetData: 校正刀到达但上一轮不完整, 跳过本轮检测 "
+                     "(cut0=%d cut1=%d cut2=%d cut3=%d cut4=%d cut5=%d cut6=%d)\n",
+                     m_InstanceId,
+                     (int)st->completeCutData[0].size(),
+                     (int)st->completeCutData[1].size(),
+                     (int)st->completeCutData[2].size(),
+                     (int)st->completeCutData[3].size(),
+                     (int)st->completeCutData[4].size(),
+                     (int)st->completeCutData[5].size(),
+                     (int)st->completeCutData[6].size());
+        }
+
+        // 清空测向刀缓冲, 准备新一轮
+        for (int i = 1; i <= 6; ++i)
+        {
+            st->currentCutBuf[i].clear();
+            st->completeCutData[i].clear();
+        }
+        st->currentCutBuf[0].clear();
+    }
+
     st->lastCut = cut;
 
-    // 将当前帧（清洗后）加入当前刀的缓冲区
+    // 将当前帧(清洗后)加入当前刀的缓冲区（每刀最多保留最近 8 帧）
     std::vector<GNSSData>& buf = st->currentCutBuf[cut];
     buf.push_back(clean);
-    if (buf.size() > 8)          // 每刀最多保留最近 8 帧
+    if (buf.size() > 8)
     {
         buf.erase(buf.begin());
+    }
+
+    // 校正刀: 立即同步到 completeCutData[0], 供下一轮 Detect 使用
+    if (cut == 0)
+    {
+        st->completeCutData[0] = st->currentCutBuf[0];
     }
 
     GN902Log(m_InstanceId,
@@ -2999,51 +3045,47 @@ void GN902::GetAlarmMoments(std::vector<AlarmMoment>& out){
     return;
 }
 
-// 检测
+// 检测: 每刀只取最后一秒(末帧)相位差数据, 共 7 帧(1 校正 + 6 测向)
+//       configCyclicRuntime(true, 1, false, 0.0):
+//         - oneCutFrams=1 → 引擎内部不做平滑 / 末帧抽取, 直接使用传入的末帧
+//         - smooth=false  → 关闭平滑
+//         - omniR=0.0     → 不重建理论模板(沿用 Init 中的半径)
 void GN902::Detect()
 {
     std::map<const GN902 *, GN902State *>::iterator it = g_gn902State.find(this);
     if (it == g_gn902State.end() || it->second->eng == 0) return;
     GN902State *st = it->second;
 
+    const int CUTS = 7;
     std::vector<GNSSData> batch;
-    const int FRAMES_PER_CUT = 8;
+    batch.reserve(CUTS);
 
-    // 按顺序：校正刀(0) 的 8 帧，刀1 的 8 帧，……，刀6 的 8 帧
-    for (int cut = 0; cut < 7; ++cut)
+    for (int cut = 0; cut < CUTS; ++cut)
     {
         const std::vector<GNSSData>& dataVec = st->completeCutData[cut];
         if (dataVec.empty())
         {
-            // 还没有完整数据，用空帧占位
             GNSSData empty;
             memset(&empty, 0, sizeof(empty));
-            for (int i = 0; i < FRAMES_PER_CUT; ++i)
-                batch.push_back(empty);
+            batch.push_back(empty);
+            GN902Log(m_InstanceId,
+                     "[ID=%d] Detect: cut=%d 无数据, 用空帧占位\n",
+                     m_InstanceId, cut);
         }
         else
         {
-            // 取最近的 8 帧（如果超过 8 帧，取后 8 帧）
-            size_t start = (dataVec.size() > FRAMES_PER_CUT) ? dataVec.size() - FRAMES_PER_CUT : 0;
-            for (size_t i = start; i < dataVec.size(); ++i)
-                batch.push_back(dataVec[i]);
-            // 不足 8 帧则补空帧
-            for (size_t i = dataVec.size() - start; i < FRAMES_PER_CUT; ++i)
-            {
-                GNSSData empty;
-                memset(&empty, 0, sizeof(empty));
-                batch.push_back(empty);
-            }
+            // ★ 只取该刀最后一秒的数据(最后一帧)
+            batch.push_back(dataVec.back());
         }
     }
 
-    // 配置引擎：每刀 8 帧，开启平滑
-    st->eng->configCyclicRuntime(true, FRAMES_PER_CUT, true, 0.0);
+    // ★ 每刀 1 帧, 不平滑; 引擎内部会直接用这 7 帧作为 dataA(每刀 1 帧)
+    st->eng->configCyclicRuntime(true, 1, false, 0.0);
     st->eng->setGNSSData(batch.data(), (int)batch.size());
 
     GN902Log(m_InstanceId,
-             "[ID=%d] Detect: batchSize=%d (7 cuts * %d frames)\n",
-             m_InstanceId, (int)batch.size(), FRAMES_PER_CUT);
+             "[ID=%d] Detect: batchSize=%d (7 cuts × 1 frame, 末帧模式, 不平滑)\n",
+             m_InstanceId, (int)batch.size());
 }
 
 // 测向
