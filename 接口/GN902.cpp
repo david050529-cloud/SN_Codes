@@ -453,7 +453,6 @@ void SpoofingDoa::Init(void){
     m_cutSequence = { {7,7}, {1,2}, {1,3}, {1,4}, {1,5}, {1,6}, {1,7} };
 
     m_OneCut_Frams = 8;
-    m_Smooth_Flag = 1;
 
     m_Doa_Cut_min_Num = 6;
     if (m_Doa_Cut_min_Num >= (int)m_cutSequence.size()) {
@@ -702,14 +701,9 @@ for (int cut = 0; cut < cutNum; ++cut) {
         LogSatelliteDataPhaseDiffB(tpB);
     }
 
-    if (m_OneCut_Frams > 1 && 1 == m_Smooth_Flag){
-        nowT = getNowTime();
-        PublicSpace::Log("get smooth data:  %s \n", nowT.c_str());
-        getSmoothData(dataA);
-    }
-
-    if (m_OneCut_Frams > 1 && 0 == m_Smooth_Flag)
+    if (m_OneCut_Frams > 1)
     {
+        nowT = getNowTime();
         PublicSpace::Log("get end fram data:  %s \n", nowT.c_str());
         getEndFramData(dataA);
     }
@@ -908,202 +902,6 @@ void SpoofingDoa::calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, Interf
     info.i_Phase_Len = size;
 }
 
-void SpoofingDoa::getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
-{
-    int cutNum = (int)m_cutSequence.size();
-    if (cutNum <= 0 || m_OneCut_Frams <= 0)
-    {
-        return;
-    }
-    if ((int)dataA.size() < cutNum * m_OneCut_Frams)
-    {
-        PublicSpace::Log("error: getSmoothData dataA.size()=%d < cutNum*oneCutFrams=%d\n",
-                         (int)dataA.size(), cutNum * m_OneCut_Frams);
-        return;
-    }
-
-    vector<SatelliteDataPhaseDiffB> dataB;
-    vector<vector<SatelliteDataPhaseDiffA>> oneCutData;
-    oneCutData.resize(m_OneCut_Frams);
-    vector<vector<SatelliteDataPhaseDiffA>> resultData;
-    SatelliteDataPhaseDiffA tpA;
-    for (int j = 0; j < cutNum; j++)
-    {
-        dataB.clear();
-        if ((int)oneCutData.size() != m_OneCut_Frams)
-        {
-            oneCutData.resize(m_OneCut_Frams);
-        }
-        for (int k = 0; k < m_OneCut_Frams; k++)
-        {
-            int index = j * m_OneCut_Frams + k;
-            oneCutData[k] = dataA[index];
-        }
-        int savedDeleteFlag = m_Delete_Prn_Flag;
-        m_Delete_Prn_Flag = 0;
-        getSatelliteDataPhaseDiffB(oneCutData, dataB);
-        m_Delete_Prn_Flag = savedDeleteFlag;
-
-        vector<SatelliteDataPhaseDiffA> tpA2;
-        tpA2.reserve(dataB.size());
-        for (unsigned int i = 0; i < dataB.size(); i++)
-        {
-            calSmoothData(dataB[i], tpA);
-            tpA2.emplace_back(tpA);
-        }
-        resultData.emplace_back(tpA2);
-    }
-    dataA.clear();
-    vector<vector<SatelliteDataPhaseDiffA>>().swap(dataA);
-    dataA = resultData;
-}
-
-void SpoofingDoa::calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA)
-{
-    // 1) 收集有效样本（SNR 有效才参与）
-    std::vector<double> samples;   // 单位：度，原始相位差
-    std::vector<double> snr1s;     // 与 samples 一一对应的 SNR1
-    std::vector<double> snr2s;     // 与 samples 一一对应的 SNR2
-
-    int length = dataB.i_diffLen;
-    for (int i = 0; i < length; ++i)
-    {
-        if (dataB.i_Snr1[i] < 1e-3 || dataB.i_Snr2[i] < 1e-3)
-        {
-            continue;
-        }
-        samples.emplace_back(dataB.i_phase_diff[i] * 360.0);
-        snr1s.emplace_back(dataB.i_Snr1[i]);
-        snr2s.emplace_back(dataB.i_Snr2[i]);
-    }
-
-    dataA.i_Sys  = dataB.i_Sys;
-    dataA.i_Type = dataB.i_Type;
-    dataA.i_Prn  = dataB.i_Prn;
-
-    int n = (int)samples.size();
-    if (n <= 0)
-    {
-        dataA.i_phase_diff = 0.0;
-        dataA.i_Snr1 = 0.0;
-        dataA.i_Snr2 = 0.0;
-        return;
-    }
-
-    // 2) 半周归一化：把样本统一到 [0, 180) 附近，消除 180° 跳变
-    //    做法：以第一个样本为参考，把与之相差接近 180° 的样本加/减 180°
-    std::vector<double> normSamples = samples;
-    for (int i = 1; i < n; ++i)
-    {
-        double diff = normalizeAngle180(normSamples[i] - normSamples[0]);
-        if (std::fabs(std::fabs(diff) - 180.0) < STABILITY_RANGE_DEG)
-        {
-            // 接近反相：整体平移 180°，使它与参考样本同相
-            if (diff > 0)
-            {
-                normSamples[i] -= 180.0;
-            }
-            else
-            {
-                normSamples[i] += 180.0;
-            }
-        }
-    }
-
-    // 3) 在归一化样本上迭代剔除离群点，直到稳定或样本不足
-    std::vector<int> keepIdx;      // 保留样本在 samples 中的下标
-    keepIdx.reserve(n);
-    for (int i = 0; i < n; ++i)
-    {
-        keepIdx.push_back(i);
-    }
-
-    const int    MAX_ITER      = 5;     // 最多迭代剔除轮数
-    const int    MIN_KEEP      = (n < MIN_STABLE_SAMPLES) ? n : MIN_STABLE_SAMPLES;
-    const double SPAN_LIMIT    = STABILITY_RANGE_DEG;   // 稳定范围阈值（度）
-
-    for (int iter = 0; iter < MAX_ITER; ++iter)
-    {
-        if ((int)keepIdx.size() <= MIN_KEEP)
-        {
-            break;
-        }
-
-        // 计算当前保留样本的圆周均值（在归一化空间）
-        std::vector<double> cur;
-        cur.reserve(keepIdx.size());
-        for (int idx : keepIdx)
-        {
-            cur.push_back(normSamples[idx]);
-        }
-        double mean = circularMeanDeg(cur);
-
-        // 找离均值最远的样本
-        int    worstPos = -1;
-        double worstDist = 0.0;
-        for (int k = 0; k < (int)keepIdx.size(); ++k)
-        {
-            double d = std::fabs(normalizeAngle180(normSamples[keepIdx[k]] - mean));
-            if (d > worstDist)
-            {
-                worstDist = d;
-                worstPos  = k;
-            }
-        }
-
-        // 如果最远样本已在稳定范围内，停止剔除
-        if (worstPos < 0 || worstDist <= SPAN_LIMIT)
-        {
-            break;
-        }
-
-        // 剔除最远样本
-        keepIdx.erase(keepIdx.begin() + worstPos);
-    }
-
-    // 4) 保留样本不足，退化为置 0（但保留原始 SNR，不再丢星）
-    if ((int)keepIdx.size() < MIN_STABLE_SAMPLES)
-    {
-        dataA.i_phase_diff = 0.0;
-        // ★ 保留原始 SNR 均值，避免整颗星在后续被 SNR=0 丢弃
-        double sum1 = 0.0, sum2 = 0.0;
-        for (int i = 0; i < n; ++i)
-        {
-            sum1 += snr1s[i];
-            sum2 += snr2s[i];
-        }
-        dataA.i_Snr1 = (float)(sum1 / n);
-        dataA.i_Snr2 = (float)(sum2 / n);
-        return;
-    }
-
-    // 5) 用保留的稳定样本做圆周均值
-    std::vector<double> keepSamples;
-    keepSamples.reserve(keepIdx.size());
-    double sumSnr1 = 0.0;
-    double sumSnr2 = 0.0;
-    for (int idx : keepIdx)
-    {
-        keepSamples.push_back(normSamples[idx]);
-        sumSnr1 += snr1s[idx];
-        sumSnr2 += snr2s[idx];
-    }
-
-    double smoothDeg = circularMeanDeg(keepSamples);
-
-    // 6) 把归一化后的均值折回 [0, 360)
-    double smoothCycle = smoothDeg / 360.0;
-    smoothCycle = fmod(smoothCycle, 1.0);
-    if (smoothCycle < 0)
-    {
-        smoothCycle += 1.0;
-    }
-
-    dataA.i_phase_diff = smoothCycle;
-    dataA.i_Snr1 = (float)(sumSnr1 / keepIdx.size());
-    dataA.i_Snr2 = (float)(sumSnr2 / keepIdx.size());
-}
-
 void SpoofingDoa::getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA)
 {
     vector<vector<SatelliteDataPhaseDiffA>> resultDataA;
@@ -1159,14 +957,13 @@ void SpoofingDoa::resetCyclicDetection(void)
     m_Baselines.clear();
 }
 
-void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR)
+void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, double omniR)
 {
     m_Cyclic_Detection_Flag = cyclic ? 1 : 0;
     if (oneCutFrams > 0)
     {
         m_OneCut_Frams = oneCutFrams;
     }
-    m_Smooth_Flag = smooth ? 1 : 0;
 
     if (omniR > 0)
     {
@@ -1176,8 +973,8 @@ void SpoofingDoa::configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth,
         m_Theory.clear();
         initTheory();
     }
-    PublicSpace::Log("configCyclicRuntime: cyclic=%d oneCutFrams=%d smooth=%d omniR=%.4f\n",
-                     m_Cyclic_Detection_Flag, m_OneCut_Frams, m_Smooth_Flag, m_omni_R);
+    PublicSpace::Log("configCyclicRuntime: cyclic=%d oneCutFrams=%d omniR=%.4f\n",
+                     m_Cyclic_Detection_Flag, m_OneCut_Frams, m_omni_R);
 }
 
 void SpoofingDoa::getCyclicDetectionData(std::vector<vector<SatelliteDataPhaseDiffA>> &dataA)
@@ -2015,7 +1812,7 @@ void SpoofingDoa::setInterferInfoDataOmni(const std::vector<SatelliteDataPhaseDi
 }
 
 const double SpoofingDoa::CNR_MIN_DB = 35.0;
-const double SpoofingDoa::STABILITY_RANGE_DEG = 10.0;
+const double SpoofingDoa::STABILITY_RANGE_DEG = 25.0;
 const int SpoofingDoa::MIN_STABLE_SAMPLES = 3;
 
 double SpoofingDoa::normalizeAngle180(double deg)
@@ -2863,7 +2660,7 @@ GN902::GN902(){
     if (st->eng != 0)
     {
         // 引擎仍按 "1 校正刀 + 6 测向刀" 的一轮模板工作
-        st->eng->configCyclicRuntime(true, 0, false, 0.1865);
+        st->eng->configCyclicRuntime(true, 0, 0.1865);
         const int cutSeq[14] = {7, 7, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7};
         st->eng->setCutSquence(14, cutSeq);
     }
@@ -3131,7 +2928,7 @@ void GN902::runDetectAndDoa()
             batch.push_back(m_recentDoaCut[d]);
     }
 
-    st->eng->configCyclicRuntime(true, FRAMES_PER_CUT, true, 0.0);
+    st->eng->configCyclicRuntime(true, FRAMES_PER_CUT, 0.0);
     st->eng->setGNSSData(batch.data(), (int)batch.size());
 
     GN902Log(m_InstanceId,

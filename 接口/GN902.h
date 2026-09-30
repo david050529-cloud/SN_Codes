@@ -527,10 +527,9 @@ public:
      * @brief 配置循环切刀运行方式
      * @param cyclic      是否启用循环切刀检测
      * @param oneCutFrams 每个切刀帧数(>0 才生效, 0=沿用旧值)
-     * @param smooth      是否多帧平滑(true=平滑, false=取末帧)
      * @param omniR       全向天线阵列半径(米, >0 时重建理论模板)
      */
-    void configCyclicRuntime(bool cyclic, int oneCutFrams, bool smooth, double omniR);
+    void configCyclicRuntime(bool cyclic, int oneCutFrams, double omniR);
 
 private:
     // ---- PreparationData.cpp: 数据预处理 ----
@@ -564,8 +563,6 @@ private:
     void setDataAngle(const GNSSData *data, int dataLen);
     void setR(void);
     void calAngleUseAntenna(const SatelliteDataPhaseDiffB dataB, InterferInfo &info, int &doaFlg);
-    void getSmoothData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
-    void calSmoothData(SatelliteDataPhaseDiffB dataB, SatelliteDataPhaseDiffA &dataA);
     void getEndFramData(vector<vector<SatelliteDataPhaseDiffA>> &dataA);
     void setSpoofingResult(SpoofingResult &result);
     void calAngle(std::map<int, std::map<int, InterferInfo>> inferInfoData);
@@ -665,12 +662,8 @@ protected:
     /// 默认相位差检测阈值(度), 用于 initDetectionThreshold 初始化各频点阈值。
     double m_Phasediff_Threshold = 5;
 
-    /// 每个切刀位置的帧数: >1 时启用多帧平滑或取末帧处理(由 m_Smooth_Flag 决定方式)。
-    /// 实际使用中每刀只喂最后一秒(1帧)，即 oneCutFrams=1，平滑/取末帧路径不生效。
+    /// 每个切刀位置的帧数: >1 时每刀取末帧参与后续处理。
     int m_OneCut_Frams = 1;
-
-    /// 平滑标志: 1=对同一切刀多帧相位差做圆周均值平滑; 0=直接取末帧。
-    int m_Smooth_Flag = 0;
 
     /// 默认欺骗检测卫星数阈值(相位差聚簇的最小卫星数)。
     int m_Detection_Threshold_Num = 2;
