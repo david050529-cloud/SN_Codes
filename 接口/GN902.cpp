@@ -1812,7 +1812,7 @@ void SpoofingDoa::setInterferInfoDataOmni(const std::vector<SatelliteDataPhaseDi
 }
 
 const double SpoofingDoa::CNR_MIN_DB = 35.0;
-const double SpoofingDoa::STABILITY_RANGE_DEG = 25.0;
+const double SpoofingDoa::STABILITY_RANGE_DEG = 30.0;
 const int SpoofingDoa::MIN_STABLE_SAMPLES = 3;
 
 double SpoofingDoa::normalizeAngle180(double deg)
